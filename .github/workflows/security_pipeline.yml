@@ -1,0 +1,79 @@
+name: Two-Stage Vulnerability Detection Pipeline
+
+on:
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  security-triage:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # Ensures access to previous commits for diff calculations
+
+      - name: Initialize Environment Workspace Directories
+        run: |
+          mkdir -p workspace_storage/codebase_vectors 
+          mkdir -p workspace_storage/artifacts/run_${{ github.sha }}
+
+      - name: Setup Docker Buildx Engine
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Operational Security Pipeline Container
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: appsec-pipeline:latest
+          outputs: type=docker,dest=/tmp/appsec-pipeline.tar
+
+      - name: Load Docker Image Locally
+        run: docker load -i /tmp/appsec-pipeline.tar
+
+      - name: Execute Stage 1 (Static Analysis Engine Capture)
+        run: |
+          # Run Semgrep via the pipeline image and save structural output patterns
+          docker run --rm -v ${{ github.workspace }}:/app/workspace appsec-pipeline:latest \
+            -m semgrep.cli --config=auto --json --output=/app/workspace/semgrep_results.json
+
+      - name: Execute Stage 2 (Local SLM Mathematical Gating)
+        env:
+          GITHUB_RUN_ID: "run_${{ github.sha }}"
+        run: |
+          # Copy Semgrep outputs into target configurations and compute triage weights
+          docker run --rm \
+            -e GITHUB_RUN_ID="run_${{ github.sha }}" \
+            -v ${{ github.workspace }}:/app/workspace \
+            appsec-pipeline:latest src/triage_orchestrator.py
+
+      - name: Execute Stage 3 (DeepAgent Context Analysis & Synthesis)
+        if: always() # Allows internal scripts to decide termination rather than CI breaking early
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          docker run --rm \
+            -e OPENAI_API_KEY \
+            -e ANTHROPIC_API_KEY \
+            -e GOOGLE_API_KEY \
+            -v ${{ github.workspace }}:/app/workspace \
+            appsec-pipeline:latest src/agent.py
+
+      - name: Move Runtime Outputs to Systematic Artifact Cache Location
+        if: always()
+        run: |
+          # Move loose outputs to the run-specific directory before upload
+          [ -f stage1_2_triage.json ] && mv stage1_2_triage.json workspace_storage/artifacts/run_${{ github.sha }}/
+          [ -f remediation_dossier.md ] && mv remediation_dossier.md workspace_storage/artifacts/run_${{ github.sha }}/ || true
+
+      - name: Archive Run-Specific Security Artifact Dossier
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-triage-dossier-${{ github.sha }}
+          path: workspace_storage/artifacts/run_${{ github.sha }}/
+          retention-days: 14

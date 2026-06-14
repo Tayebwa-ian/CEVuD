@@ -1,0 +1,11 @@
+{
+  "results": [
+    {
+      "path": "app/views.py",
+      "extra": {
+        "severity": "ERROR",
+        "lines": "db.session.execute(f'SELECT * FROM users WHERE id = {user_id}')"
+      }
+    }
+  ]
+}
