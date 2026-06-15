@@ -45,11 +45,13 @@ To avoid losing short, critical software flaws within large source blocks, data 
 ## 5. Systematic Run Storage Architecture
 Every execution generates versioned, trackable records stored under a run-specific identifier (GitHub SHA) for auditability:
 
+```text
 workspace_storage/
 └── artifacts/
-    └── run_<GITHUB_SHA>/            # Root directory for specific pipeline execution
-├── stage1_2_triage.json       # Structural metrics and evaluation scores
-└── remediation_dossier.md     # In-depth mitigation report (if escalated)
+    └── run_<GITHUB_SHA>/              # Root directory for specific pipeline execution
+        ├── stage1_2_triage.json       # Structural metrics and evaluation scores
+        └── remediation_dossier.md     # In-depth mitigation report (if escalated)
+```
 
 ## 6. Core Component Contracts
 
