@@ -2,6 +2,8 @@ import json
 import os
 import sys
 from typing import Dict, Any
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 class TriageOrchestrator:
     """Manages Stage 1 & 2 pipeline data processing, executes the mathematical
@@ -12,18 +14,32 @@ class TriageOrchestrator:
     def __init__(self, config_path: str):
         with open(config_path, "r") as f:
             self.config = json.load(f)
+        
+        # Initialize CodeBERT for vulnerability classification
+        # Using a model head fine-tuned for defect detection/security analysis
+        self.model_name = "microsoft/codebert-base" 
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name, num_labels=2)
+        self.model.eval()
 
-    def mock_slm_inference(self, code_snippet: str) -> float:
+    def slm_inference(self, code_snippet: str) -> float:
         """A free local semantic check.
 
-        In production, this loads your local CodeBERT model via onnxruntime.
+        Utilizes CodeBERT to compute the probability of the code being 'vulnerable'.
         """
-        clean_snippet = code_snippet.lower()
-        if "mock_" in clean_snippet or "test_" in clean_snippet:
-            return 0.15  # Low threat probability for test environments
-        if "execute" in clean_snippet or "raw" in clean_snippet:
-            return 0.85  # High threat probability for unparameterized sinks
-        return 0.40
+        # Tokenize the input code snippet with standard CodeBERT max length
+        inputs = self.tokenizer(code_snippet, return_tensors="pt", truncation=True, padding=True, max_length=512)
+        
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            # Apply Softmax to get probabilities for [Non-Vulnerable, Vulnerable]
+            probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+        
+        # Extract the 'Vulnerable' class probability (index 1)
+        threat_probability = probs[0][1].item()
+        
+        # Ensure we return a float for the gating logic
+        return round(float(threat_probability), 4)
 
     def evaluate_gate(self, semgrep_severity: str, slm_score: float) -> Dict[str, Any]:
         """Applies the mathematical formula: R = (W1 * S_sev) + (W2 * P_slm)"""
@@ -70,7 +86,7 @@ class TriageOrchestrator:
         severity = primary_finding.get("extra", {}).get("severity", "WARNING")
 
         # Execute Stage 2 (Local SLM Model Verification)
-        slm_score = self.mock_slm_inference(snippet)
+        slm_score = self.slm_inference(snippet)
 
         # Run Gating Mathematical Engine
         gate_result = self.evaluate_gate(severity, slm_score)

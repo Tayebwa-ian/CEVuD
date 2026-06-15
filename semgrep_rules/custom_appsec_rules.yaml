@@ -1,0 +1,160 @@
+rules:
+  # ==========================================
+  # VULNERABILITY 1: Unsafe Data Deserialization
+  # ==========================================
+  - id: unsafe-deserialization
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: flask.request.$ANY
+              - pattern: input(...)
+              - pattern: sys.argv
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: pickle.loads($SINK)
+              - pattern: pickle.load($SINK)
+              - pattern: yaml.load($SINK, Loader=yaml.Loader)
+              - pattern: yaml.load($SINK)
+    message: >-
+      Critical flaw: Unsafe untrusted data deserialization detected. 
+      Using pickle or un-gated yaml.load allows arbitrary remote code execution (RCE) vectors. 
+      Remediation: Switch to safe alternative parsing tools like json.loads() or yaml.safe_load().
+    languages: [python]
+    severity: ERROR
+
+  # ==========================================
+  # VULNERABILITY 2: Hardcoded Secrets & Tokens
+  # ==========================================
+  - id: hardcoded-auth-secrets
+    patterns:
+      - pattern-either:
+          - pattern: $KEY = "eyJ..."
+          - pattern: $KEY = "ghp_..."
+          - pattern: $KEY = "sk-proj-..."
+          - pattern: |
+              $SECRET_VAR = "..."
+              ...
+              headers = { ..., "Authorization": $SECRET_VAR, ... }
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i)(api_key|token|secret|password|private_key|credential)
+    message: >-
+      Security Warning: Hardcoded authorization token, credential string, or API key identified. 
+      Committing plaintext secrets exposes resources to systemic credential harvesting. 
+      Remediation: Extract sensitive configurations to environment variables via os.environ.get().
+    languages: [python]
+    severity: ERROR
+
+  # ==========================================
+  # VULNERABILITY 3: SQL Injection (SQLi)
+  # ==========================================
+  - id: raw-string-sql-injection
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: flask.request.$ANY
+              - pattern: request.args.get(...)
+              - pattern: request.form[...]
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CURSOR.execute(f"...")
+              - pattern: $CURSOR.execute("..." % ...)
+              - pattern: $CURSOR.execute("...".format(...))
+    message: >-
+      Flaw identified: Insecure raw string formatting found within a database query executor. 
+      This pattern permits direct malicious parameter injection breakout vectors. 
+      Remediation: Implement bound parameterized inputs natively via target DB-driver execution tuples.
+    languages: [python]
+    severity: ERROR
+
+  # ==========================================
+  # VULNERABILITY 4: Server-Side Command Injection
+  # ==========================================
+  - id: subprocess-shell-injection
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: flask.request.$ANY
+              - pattern: input(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: subprocess.run(..., shell=True, ...)
+              - pattern: subprocess.Popen(..., shell=True, ...)
+              - pattern: os.system(...)
+          - pattern-not:
+              - pattern: subprocess.run(..., shell=True, choices=...)
+    message: >-
+      Dangerous Pattern: Process executed with host shell integration explicitly enabled. 
+      Unsanitized variables passed here yield direct shell command injection privileges to attackers. 
+      Remediation: Pass statements as safe structural lists and set shell=False.
+    languages: [python]
+    severity: WARNING
+
+  # ==========================================
+  # VULNERABILITY 5: Arbitrary Path Traversal
+  # ==========================================
+  - id: unsafe-path-traversal
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern: flask.request.$ANY
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: open(os.path.join(..., $INPUT), ...)
+              - pattern: open(f".../{$INPUT}", ...)
+          - pattern-not:
+              - pattern: open(os.path.abspath(...), ...)
+    message: >-
+      Notice: Unchecked external input parameters processed inside local filesystem lookups. 
+      Attackers can append relative escape dots (../../etc/passwd) to extract hidden files. 
+      Remediation: Normalize target structures completely using os.path.abspath before invoking read utilities.
+    languages: [python]
+    severity: WARNING
+
+  # ==========================================
+  # VULNERABILITY 6: Cross-Site Scripting (XSS)
+  # ==========================================
+  - id: reflected-xss
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern: flask.request.$ANY
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: flask.render_template_string(...)
+              - pattern: flask.make_response(...)
+    message: >-
+      Security Risk: Reflected Cross-Site Scripting (XSS) detected. 
+      Untrusted user input is being rendered directly into a template or response string.
+      Remediation: Use standard render_template() which auto-escapes, or manually escape input using markupsafe.escape().
+    languages: [python]
+    severity: ERROR
+
+  # ==========================================
+  # VULNERABILITY 7: Server-Side Request Forgery (SSRF)
+  # ==========================================
+  - id: ssrf-request
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern: flask.request.$ANY
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: requests.get(...)
+              - pattern: requests.post(...)
+              - pattern: urllib.request.urlopen(...)
+    message: >-
+      Security Risk: Potential SSRF detected. 
+      A network request is being made to a URL derived from user input.
+      Remediation: Validate target URLs against a strict allowlist of domains/IPs.
+    languages: [python]
+    severity: WARNING

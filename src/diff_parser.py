@@ -66,16 +66,20 @@ class DiffParser:
 
         impacted_functions = []
 
+        # Standardized AST traversal to find function definitions
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                # Calculate line span of the function definition
+                # Determine the start and end boundaries of the function block.
+                # decorators are included in the lineno of the FunctionDef node.
                 start_line = node.lineno
-                # end_lineno is supported in Python 3.8+
-                end_line = getattr(node, "end_lineno", start_line + 50) 
+                
+                # Use end_lineno (Python 3.8+) for precise slicing. 
+                # Fallback to a default span if the attribute is missing.
+                end_line = getattr(node, "end_lineno", start_line + 20) 
                 
                 # Check if any modified lines fall within this function's scope
                 if any(start_line <= line <= end_line for line in modified_lines):
-                    # Reconstruct function text from lines
+                    # Extract the raw source code lines for this specific logical block
                     lines = file_content.splitlines()[start_line - 1:end_line]
                     impacted_functions.append("\n".join(lines))
 

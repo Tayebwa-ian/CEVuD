@@ -2,6 +2,8 @@
 
 import json
 import os
+import torch
+from transformers import AutoTokenizer, AutoModel
 from deepagents import create_deep_agent
 from .llm_factory import LLMFactory
 from .vector_store import LocalVectorStore
@@ -13,6 +15,39 @@ class DeepAppSecAgent:
         with open(config_path, "r") as f:
             self.config = json.load(f)
         self.vector_store = LocalVectorStore(config_path)
+        
+        # Initialize CodeBERT for feature extraction (embeddings)
+        self.model_name = "microsoft/codebert-base"
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.model = AutoModel.from_pretrained(self.model_name)
+        self.model.eval()
+
+    def _get_context_tool(self, query_text: str):
+        """
+        Tool for the DeepAgent to retrieve semantically relevant code snippets.
+        Generates real vectors using CodeBERT to query the LocalVectorStore.
+        """
+        # Generate semantic embedding for the query text
+        inputs = self.tokenizer(query_text, return_tensors="pt", truncation=True, max_length=512)
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            # Use the pooled output or CLS token as the representative 768-dim vector
+            # For CodeBERT, the first token ([CLS]) serves as the aggregate representation
+            query_embedding = outputs.last_hidden_state[0][0].numpy().tolist()
+        
+        # Query the SQLite vector store with the generated embedding
+        related_code = self.vector_store.query_cross_file_context(query_embedding, limit=3)
+        
+        if not related_code:
+            return "No additional relevant context found in the local vector store."
+            
+        context_str = "--- Additional Repository Context ---\n"
+        for item in related_code:
+            context_str += f"File: {item['file_path']} | Function: {item['function_name']}\n"
+            context_str += f"Code:\n{item['source_code']}\n"
+            context_str += "------------------------------------\n"
+        
+        return context_str
 
     def execute_deep_analysis(self) -> None:
         """Assembles complex structural code inputs and passes them to a deep task-handling agent."""
@@ -38,11 +73,14 @@ class DeepAppSecAgent:
         security_agent = create_deep_agent(
             model=base_model,
             tools=[], # Can be augmented with custom file-reading/repo tools
+            # Integrated the LocalVectorStore as a tool for the agent
+            tools=[self._get_context_tool], 
             system_prompt=(
                 "You are an elite Application Security Vulnerability Engineer. "
                 "Your objective is to systematically review large codebase diff slices, "
                 "break down the structural interaction paths into explicit tasks using your internal todos, "
                 "and assemble a clean, definitive Remediation Report."
+                "and assemble a clean, definitive Remediation Report. Use your tools to find related code context."
             )
         )
 

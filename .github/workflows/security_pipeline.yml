@@ -12,7 +12,7 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2 # Ensures access to previous commits for diff calculations
+          fetch-depth: 2
 
       - name: Initialize Environment Workspace Directories
         run: |
@@ -22,20 +22,22 @@ jobs:
       - name: Setup Docker Buildx Engine
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Operational Security Pipeline Container
+      - name: Build Operational Security Pipeline Container with GHA Caching
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
           tags: appsec-pipeline:latest
           outputs: type=docker,dest=/tmp/appsec-pipeline.tar
+          # Enable full multi-layer caching inside GitHub Actions backend
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Load Docker Image Locally
         run: docker load -i /tmp/appsec-pipeline.tar
 
       - name: Execute Stage 1 (Static Analysis Engine Capture)
         run: |
-          # Run Semgrep via the pipeline image and save structural output patterns
           docker run --rm -v ${{ github.workspace }}:/app/workspace appsec-pipeline:latest \
             -m semgrep.cli --config=auto --json --output=/app/workspace/semgrep_results.json
 
@@ -43,7 +45,6 @@ jobs:
         env:
           GITHUB_RUN_ID: "run_${{ github.sha }}"
         run: |
-          # Copy Semgrep outputs into target configurations and compute triage weights
           docker run --rm \
             -e GITHUB_RUN_ID="run_${{ github.sha }}" \
             -v ${{ github.workspace }}:/app/workspace \
@@ -66,7 +67,6 @@ jobs:
       - name: Move Runtime Outputs to Systematic Artifact Cache Location
         if: always()
         run: |
-          # Move loose outputs to the run-specific directory before upload
           [ -f stage1_2_triage.json ] && mv stage1_2_triage.json workspace_storage/artifacts/run_${{ github.sha }}/
           [ -f remediation_dossier.md ] && mv remediation_dossier.md workspace_storage/artifacts/run_${{ github.sha }}/ || true
 
