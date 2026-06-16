@@ -5,3 +5,7 @@ __pycache__/
 *.pyo
 semgrep_results.json
 stage1_2_triage.json
+vulnerability_samples/
+workspace_storage/
+research_outline.md
+skills/

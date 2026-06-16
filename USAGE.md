@@ -25,19 +25,21 @@ export OPENAI_API_KEY='your-api-key-here'
 #### A. Ingestion (Seeding Context)
 Before running the pipeline, you must populate the `LocalVectorStore`.
 
-*   **Benchmark Mode:** Use a "Gold Standard" JSON to test accuracy.
+*   **Benchmark Mode:** Seed the DB and deploy code samples for manual testing.
     ```bash
-    python src/dataset_ingest.py --mode benchmark --file gold_standard.json
+    python src/dataset_ingest.py --mode benchmark --file src/data/gold_standard.json
     ```
+    *This creates a `vulnerability_samples/` directory containing the test code.*
+
 *   **Repository Mode:** Index an entire local codebase for RAG context.
     ```bash
     python src/dataset_ingest.py --mode repo --path ./path/to/your/code
     ```
 
 #### B. Stage 1: Static Analysis
-Run Semgrep to generate the initial findings report.
+Scan the materialized samples (or your own code) to generate a findings report.
 ```bash
-semgrep --config ./semgrep_rules/custom_appsec_rules.yaml --json --output semgrep_results.json .
+semgrep --config p/python --config ./semgrep_rules/custom_appsec_rules.yaml --exclude src --exclude workspace_storage --json --output semgrep_results.json vulnerability_samples/
 ```
 
 #### C. Stage 2: Triage & Mathematical Gating

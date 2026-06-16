@@ -5,7 +5,11 @@ from typing import Any
 from langchain_core.language_models.chat_models import BaseChatModel
 
 class LLMFactory:
-    """Dynamic provider mapping factory for abstracting frontier LLM backends."""
+    """
+    Factory pattern implementation for initializing LangChain Chat Models.
+    Allows the pipeline to switch between providers (OpenAI, Anthropic, Gemini) 
+    via configuration without changing the core agent logic.
+    """
 
     @staticmethod
     def get_model(provider: str, model_name: str, temperature: float) -> BaseChatModel:

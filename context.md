@@ -1,10 +1,10 @@
 # Context File: LLM-Guided Two-Stage Vulnerability Detection Pipeline
 
 ## 1. Project Purpose
-An automated, cost-efficient security gate for Python source code running inside a public CI/CD workspace environment. It intercepts code modifications, uses lightweight AST rules and a fast local machine learning model to compute an exploitability probability score, and escalates to a frontier LLM only when a specific mathematical risk boundary is breached.
+An automated, cost-efficient security gate for Python source code running inside a public CI/CD workspace environment. It intercepts code modifications, utilizing both static analysis and a semantic "fail-safe" layer. Even if static rules find no matches, the system extracts modified functions and evaluates them via a local SLM to compute a risk score. If *any* identified vulnerability exceeds a mathematical boundary, the system escalates *all* high-risk findings to a frontier LLM for deep synthesis.
 
 ### Project Objectives
- Objective are a cost efficient software vulnerability detection while effective ensuring maximum detection, therefore metrics to measure these 2 objectives are extremely important. 
+ Objectives are cost-efficient software vulnerability detection while effectively ensuring maximum detection. The system covers OWASP Top 10 categories including Injection, Broken Access Control, and Cryptographic Failures.
 
 ## 2. Core Metrics: Balancing Cost vs. Detection
 
@@ -30,7 +30,7 @@ To evaluate whether the pipeline meets your twin goals of high detection accurac
 
 ## 3. Tech Stack & Runtimes
 - **Runtime Environment:** Python 3.14.6 (Isolated Docker Platform layer).
-- **Stage 1 (Static Layer):** Semgrep OSS Engine running **Taint Analysis** (Source-to-Sink data flow tracing).
+- **Stage 1 (Static Layer):** Semgrep OSS Engine running **Registry Rules (p/python)** and **Custom Taint Analysis** (Source-to-Sink data flow tracing).
 - **Stage 2 (Semantic Layer):** Local CodeBERT embedding tokenization and classification heads compiled via `onnxruntime` for zero-cost CPU processing.
 - **Stage 3 (Synthesis Layer):** An LLM-agnostic LangChain engine integrated with `deepagents` for complex task decomposition.
 - **Context Storage:** Local file-based SQLite relational databases storing serialized 768-dimensional float blocks.
@@ -41,16 +41,25 @@ To avoid losing short, critical software flaws within large source blocks, data 
 1. **AST Separation:** Python source changes are split into separate function blocks via Python's native `ast` module.
 2. **Granular Embeddings:** Each method is vectorized independently and logged along with its file metadata (`file_path`, `function_name`).
 3. **Targeted Context Queries:** When code is flagged, the system looks up semantic matches at the precise function level, keeping the input context compact and clean.
+4. **Source Exclusion:** The pipeline is configured to ignore its own source code (the `src/` directory) and temporary artifacts (`workspace_storage/`) to prevent self-scanning and redundant analysis.
 
 ## 5. Systematic Run Storage Architecture
 Every execution generates versioned, trackable records stored under a run-specific identifier (GitHub SHA) for auditability:
 
 ```text
 workspace_storage/
+├── evaluation_runs/
+│   └── eval_<TIMESTAMP>/                # Unique benchmark execution
+│       ├── summary.json                 # Quantitative metrics (Recall, TRR, Precision)
+│       ├── semgrep_eval_results.json    # Live Stage 1 output for benchmarks
+│       ├── confusion_matrix.png         # Visual performance heatmap
+│       ├── risk_distribution.png        # Statistical risk score spread
+│       └── input_ledger_snapshot.json   # Ground truth data used for the run
 └── artifacts/
-    └── run_<GITHUB_SHA>/              # Root directory for specific pipeline execution
-        ├── stage1_2_triage.json       # Structural metrics and evaluation scores
-        └── remediation_dossier.md     # In-depth mitigation report (if escalated)
+    └── run_<GITHUB_SHA>/                # Unique run-specific container
+        ├── semgrep_results.json         # Stage 1: Raw structural findings
+        ├── stage1_2_triage.json         # Stage 2: Triage metrics and gate decisions
+        └── remediation_dossier.md       # Stage 3: Full AI-generated remediation report
 ```
 
 ## 6. Core Component Contracts
@@ -81,8 +90,10 @@ $$R = (W_1 \cdot S_{\text{sev}}) + (W_2 \cdot P_{\text{slm}})$$
 Where:
 - $S_{\text{sev}}$ is the Semgrep severity score (`INFO` = 0.3, `WARNING` = 0.7, `ERROR` = 1.0).
 - $P_{\text{slm}}$ is the local ONNX model's classification probability output.
-- $W_1 = 0.4$ and $W_2 = 0.6$ represent the default operational weights.
-- If $R \ge 0.65$, trigger Stage 3. Otherwise, log the result and terminate cleanly to save tokens.
+- $W_1 = 0.3$ and $W_2 = 0.7$ represent the default operational weights (optimized for SLM-heavy gating).
+- If $R \ge 0.55$, trigger Stage 3. Otherwise, log the result and terminate cleanly to save tokens.
+**Escalation Logic:** If *any* individual finding's risk score ($R$) meets or exceeds the threshold, *all* high-risk findings are passed to Stage 3.
+**Fail-Safe Logic:** If Semgrep returns zero findings, $W_1$ is set to $0.0$ and the pipeline evaluates the modified code diff directly via the SLM.
 
 
 ## 7. System Execution Manifest & File Map
@@ -96,6 +107,14 @@ Where:
 - `/src/llm_factory.py`: The model mapping manager that handles agnostic provider switching.
 - `/src/agent.py`: Advanced agent runtime using `deepagents` task structures to write the final remediation report.
 - `/src/evaluate_pipeline.py`: Performance benchmarking suite that measures Recall, Precision, and Token Reduction using real model inference.
+- `/src/data/gold_standard.json`: Ground truth dataset containing vulnerable and secure code pairs for benchmark validation.
 - `/src/dataset_ingest.py`: Multi-mode ingestion utility.
-    - **Mode A (Benchmark):** Loads CVE/fix pairs from a Gold Standard JSON.
+    - **Mode A (Benchmark):** Loads CVE/fix pairs and materializes them into `vulnerability_samples/` for manual testing.
     - **Mode B (Repository):** Crawls a codebase to build a semantic index for RAG-based analysis.
+
+## 8. CLI & Distribution Roadmap
+To transition the pipeline from a CI-scripting project to a portable security utility:
+1. **Entry Points:** Implement a `click` or `typer` CLI to expose `cevud scan` and `cevud eval` commands.
+2. **Dynamic Configuration:** Move from a static `config.json` in the root to a prioritized search order: (CLI Flag > Environment Variable > `~/.cevud/config.json` > Default).
+3. **Asset Management:** Use `huggingface_hub` for managed CodeBERT weight downloads rather than local path assumptions.
+4. **Namespace Packaging:** Structure the `src` directory as a formal `cevud` package to handle cross-module imports reliably.

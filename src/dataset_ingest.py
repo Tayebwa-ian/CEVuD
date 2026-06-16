@@ -6,13 +6,22 @@ import argparse
 import torch
 import re
 from transformers import AutoTokenizer, AutoModel
-from .diff_parser import DiffParser
-from src.vector_store import LocalVectorStore
+from diff_parser import DiffParser
+from vector_store import LocalVectorStore
 
 class IngestManager:
-    """Handles different data ingestion modes: Gold Standard Benchmarks or Repository Crawling."""
+    """
+    Context Management utility for seeding the LocalVectorStore.
+    Supports benchmarking with ground-truth data or indexing a live repository.
+    """
     
     def __init__(self, config_path: str):
+        """
+        Initializes models and database connections for data ingestion.
+
+        Args:
+            config_path (str): Configuration file path.
+        """
         with open(config_path, "r") as f:
             self.config = json.load(f)
         
@@ -26,19 +35,44 @@ class IngestManager:
         self.model.eval()
 
     def _generate_embedding(self, text: str):
-        """Generates a real 768-dim vector using CodeBERT."""
+        """
+        Computes a semantic vector using CodeBERT.
+
+        Args:
+            text (str): Source code or query text.
+
+        Returns:
+            List[float]: 768-dimensional embedding vector.
+        """
         inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
         with torch.no_grad():
             outputs = self.model(**inputs)
             return outputs.last_hidden_state[0][0].numpy().tolist()
 
     def ingest_benchmark_json(self, json_path: str):
-        """Loads a Gold Standard JSON and seeds the evaluation ledger."""
+        """
+        Seeds the database from a JSON manifest of known vulnerabilities.
+
+        Args:
+            json_path (str): Path to the gold_standard.json file.
+        """
         print(f"[*] Ingesting benchmark data from: {json_path}")
         with open(json_path, "r") as f:
             test_suite = json.load(f)
         
+        # Materialize snippets to a local folder so they can be scanned manually by Stage 1
+        samples_dir = "vulnerability_samples"
+        os.makedirs(samples_dir, exist_ok=True)
+        print(f"[*] Materializing benchmark snippets to: {samples_dir}/")
+
         for item in test_suite:
+            # Create a safe filename for the snippet
+            safe_fn = item["function_name"].replace(" ", "_")
+            file_path = os.path.join(samples_dir, f"{safe_fn}.py")
+            
+            with open(file_path, "w") as f:
+                f.write(item["source_code"])
+
             vector = self._generate_embedding(item["source_code"])
             self.db.insert_code_block(
                 file_path=item["file_path"],
@@ -54,7 +88,12 @@ class IngestManager:
         print(f"[+] Successfully seeded {len(test_suite)} benchmark cases.")
 
     def ingest_repository(self, repo_path: str):
-        """Walks a local directory, extracts all functions, and indexes them."""
+        """
+        Performs a full crawl of a repository to build a semantic RAG index.
+
+        Args:
+            repo_path (str): Local root directory of the repository to index.
+        """
         print(f"[*] Crawling repository at: {repo_path}")
         count = 0
         for root, _, files in os.walk(repo_path):

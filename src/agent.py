@@ -5,16 +5,40 @@ import os
 import torch
 from transformers import AutoTokenizer, AutoModel
 from deepagents import create_deep_agent
-from .llm_factory import LLMFactory
-from .vector_store import LocalVectorStore
+from llm_factory import LLMFactory
+from vector_store import LocalVectorStore
 
 class DeepAppSecAgent:
-    """Decomposes massive file contents into structured tasks for secure resolution."""
+    """
+    Stage 3 Synthesis Agent.
+    This class handles the most expensive part of the pipeline: using a frontier LLM
+    to perform deep task decomposition and remediation generation for high-risk flaws.
+    """
 
     def __init__(self, config_path: str):
-        with open(config_path, "r") as f:
-            self.config = json.load(f)
+        """
+        Sets up the agent with vector store access and run-specific artifact paths.
+
+        Args:
+            config_path (str): Configuration mapping for models and storage.
+        """
+        try:
+            with open(config_path, "r") as f:
+                self.config = json.load(f)
+        except FileNotFoundError:
+            # Portable configuration lookup
+            root_config = os.path.join(os.path.dirname(__file__), "..", "config.json")
+            with open(root_config, "r") as f:
+                self.config = json.load(f)
+
         self.vector_store = LocalVectorStore(config_path)
+
+        # Resolve the specific run directory for inputs and outputs
+        self.run_id = os.getenv("GITHUB_SHA") or os.getenv("GITHUB_RUN_ID") or "local-dev-run"
+        if not self.run_id.startswith("run_"):
+            self.run_id = f"run_{self.run_id}"
+            
+        self.artifact_dir = os.path.join(self.config["paths"]["workspace_root"], self.config["paths"]["artifacts_subdir"], self.run_id)
         
         # Initialize CodeBERT for feature extraction (embeddings)
         self.model_name = "microsoft/codebert-base"
@@ -24,8 +48,14 @@ class DeepAppSecAgent:
 
     def _get_context_tool(self, query_text: str):
         """
-        Tool for the DeepAgent to retrieve semantically relevant code snippets.
-        Generates real vectors using CodeBERT to query the LocalVectorStore.
+        Semantic Search tool utilized by the DeepAgent's reasoning loop.
+        It generates an embedding for the query and fetches cross-file context.
+
+        Args:
+            query_text (str): The natural language or code query from the agent.
+        
+        Returns:
+            str: Formatted context string for the LLM prompt.
         """
         # Generate semantic embedding for the query text
         inputs = self.tokenizer(query_text, return_tensors="pt", truncation=True, max_length=512)
@@ -50,8 +80,12 @@ class DeepAppSecAgent:
         return context_str
 
     def execute_deep_analysis(self) -> None:
-        """Assembles complex structural code inputs and passes them to a deep task-handling agent."""
-        triage_file = self.config["paths"]["triage_report"]
+        """
+        Orchestrates the Stage 3 workflow.
+        Reads the triage gate results and, if escalated, invokes the DeepAgent
+        to produce a detailed remediation dossier.
+        """
+        triage_file = os.path.join(self.artifact_dir, self.config["paths"]["triage_report"])
 
         with open(triage_file, "r") as f:
             triage_data = json.load(f)
@@ -59,8 +93,11 @@ class DeepAppSecAgent:
         if not triage_data.get("gate_decision", {}).get("escalate_to_llm", False):
             print("[+] Gating threshold conditions not breached. Halting agent execution.")
             return
+            
+        escalated_findings = [f for f in triage_data.get("findings", []) if f.get("escalate")]
+        print(f"[*] Escalating {len(escalated_findings)} high-risk findings to DeepAgent...")
 
-        # Initialize the agnostic model instantiation wrapper
+        # Initialize the agnostic model instantiation wrapper (once)
         llm_cfg = self.config["stage3_llm"]
         base_model = LLMFactory.get_model(
             provider=llm_cfg["provider"],
@@ -68,52 +105,50 @@ class DeepAppSecAgent:
             temperature=llm_cfg["temperature"]
         )
 
-        # Initialize the advanced task-breaking agent harness
-        print("[*] Instantiating DeepAgent workspace environment to handle long context slices...")
+        # Initialize the advanced task-breaking agent harness (once)
+        print("[*] Instantiating DeepAgent workspace environment to handle multiple findings...")
         security_agent = create_deep_agent(
             model=base_model,
-            tools=[], # Can be augmented with custom file-reading/repo tools
-            # Integrated the LocalVectorStore as a tool for the agent
-            tools=[self._get_context_tool], 
+            tools=[self._get_context_tool],
             system_prompt=(
                 "You are an elite Application Security Vulnerability Engineer. "
-                "Your objective is to systematically review large codebase diff slices, "
-                "break down the structural interaction paths into explicit tasks using your internal todos, "
-                "and assemble a clean, definitive Remediation Report."
-                "and assemble a clean, definitive Remediation Report. Use your tools to find related code context."
+                "Your objective is to systematically review a list of high-risk code findings, "
+                "plan your analysis to cover all of them, break down the structural interaction paths "
+                "into explicit tasks, and consolidate your findings into a single, comprehensive "
+                "Remediation Dossier. For each finding, include sections for 'Vulnerability Analysis', "
+                "'Source/Sink Lineage', 'Exploit PoC Steps', and 'Remediation Patch'. "
+                "Use your tools to find related code context when necessary."
             )
         )
 
-        # Extract target vulnerability metadata parameters
-        semgrep_raw_path = self.config["paths"]["semgrep_output"]
-        with open(semgrep_raw_path, "r") as f:
-            raw_lines = json.load(f).get("results", [])[0]["extra"]["lines"]
+        # Prepare the consolidated input for the agent
+        findings_input = ""
+        for idx, finding in enumerate(escalated_findings):
+            findings_input += f"### Finding {idx+1}:\n"
+            findings_input += f"File: {finding['evaluated_file']}\n"
+            findings_input += f"Code Snippet:\n```python\n{finding['code_snippet']}\n```\n"
+            findings_input += f"Calculated Risk: {finding['metrics']['calculated_combined_risk']:.3f}\n\n"
 
-        # Build task execution payload query
         execution_query = {
             "messages": (
-                f"Task: Analyze this structural code change for a security flaw:\n\n"
-                f"Code Snippet:\n{raw_lines}\n\n"
-                f"Instructions: Use your internal planning tools to systematically trace the data lineage, "
-                f"identify potential edge cases across files, and output a markdown report with sections for "
-                f"Source/Sink Lineage, Exploit PoC Steps, and a Remediation Patch."
+                f"Task: Analyze the following list of high-risk security findings. "
+                f"For each finding, provide a detailed analysis including Source/Sink Lineage, "
+                f"Exploit Proof-of-Concept Steps, and a Remediation Patch. "
+                f"Consolidate all analyses into a single, well-structured Markdown report.\n\n"
+                f"High-Risk Findings:\n{findings_input}"
             )
         }
 
-        # Run model task interaction loops
+        # Run model task interaction loops (once for all findings)
         response = security_agent.invoke(execution_query)
+        final_dossier = response["messages"][-1].content
 
-        # Create systematic runtime artifact save directory paths
-        run_id = triage_data.get("run_id", "fallback_run")
-        artifact_dir = f"./workspace_storage/artifacts/{run_id}"
-        os.makedirs(artifact_dir, exist_ok=True)
-
-        # Save output documents to artifact vault paths
-        report_path = os.path.join(artifact_dir, "remediation_dossier.md")
+        # Save consolidated output dossier to artifact vault paths
+        report_path = os.path.join(self.artifact_dir, "remediation_dossier.md")
         with open(report_path, "w") as out:
-            out.write(response["messages"][-1].content)
+            out.write(final_dossier)
 
-        print(f"[+] Systematic artifact report archived securely inside: {report_path}")
+        print(f"[+] Consolidated remediation dossier archived securely inside: {report_path}")
 
 if __name__ == "__main__":
     orchestrator_agent = DeepAppSecAgent("config.json")

@@ -39,7 +39,7 @@ jobs:
       - name: Execute Stage 1 (Static Analysis Engine Capture)
         run: |
           docker run --rm -v ${{ github.workspace }}:/app/workspace appsec-pipeline:latest \
-            -m semgrep.cli --config=auto --json --output=/app/workspace/semgrep_results.json
+            -m semgrep.cli --config=p/python --config=/app/semgrep_rules/custom_appsec_rules.yaml --exclude src --exclude workspace_storage --json --output=/app/workspace/semgrep_results.json
 
       - name: Execute Stage 2 (Local SLM Mathematical Gating)
         env:

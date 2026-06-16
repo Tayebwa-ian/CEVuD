@@ -3,16 +3,18 @@ import re
 from typing import Dict, List, Set
 
 class DiffParser:
-    """Handles the processing of git diffs and extracts structural code blocks
-
-    using Python's native Abstract Syntax Tree (AST) module.
+    """
+    Static utility class for decomposing Git diffs and Python source code.
+    It identifies which specific lines changed and uses AST to map those lines 
+    to discrete function/method blocks.
     """
 
     def __init__(self, diff_content: str):
         self.diff_content = diff_content
 
     def parse_modified_lines(self) -> Dict[str, Set[int]]:
-        """Parses a raw git diff string to extract modified file paths and line numbers.
+        """
+        Processes a raw 'git diff' string to isolate modified line numbers.
 
         Returns:
             Dict[str, Set[int]]: Mapping of file paths to a set of added/modified line numbers.
@@ -29,7 +31,8 @@ class DiffParser:
             file_match = file_re.match(line)
             if file_match:
                 current_file = file_match.group(1)
-                if current_file.endswith(".py"):
+                # Ignore pipeline source code and only focus on target app logic
+                if current_file.endswith(".py") and not current_file.startswith("src/"):
                     modified_files[current_file] = set()
                 continue
 
@@ -50,7 +53,9 @@ class DiffParser:
 
     @staticmethod
     def get_functions_from_ast(file_content: str, modified_lines: Set[int]) -> List[str]:
-        """Uses Python AST to match modified line numbers to specific function blocks.
+        """
+        Matches modified line numbers to the boundaries of function definitions.
+        Ensures that only the logical blocks impacted by changes are analyzed.
 
         Args:
             file_content (str): Complete source code of the modified file.

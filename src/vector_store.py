@@ -5,7 +5,11 @@ import struct
 from typing import List, Tuple, Dict, Any
 
 class LocalVectorStore:
-    """Manages an embedded, zero-cost codebase semantic context index inside SQLite."""
+    """
+    Persistent context store using SQLite. 
+    Stores source code alongside binary embeddings to facilitate 
+    semantic search and RAG for the Stage 3 agent.
+    """
 
     def __init__(self, config_path: str):
         with open(config_path, "r") as f:
@@ -44,7 +48,14 @@ class LocalVectorStore:
 
     @staticmethod
     def _compute_cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
-        """Calculates the exact angular similarity profile between two dense vectors."""
+        """
+        Calculates cosine similarity between two vectors.
+
+        Args:
+            vec_a, vec_b: List of floating point numbers.
+        Returns:
+            float: Similarity score between 0.0 and 1.0.
+        """
         dot_product = sum(a * b for a, b in zip(vec_a, vec_b))
         norm_a = sum(a * a for a in vec_a) ** 0.5
         norm_b = sum(b * b for b in vec_b) ** 0.5
