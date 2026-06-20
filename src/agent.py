@@ -15,13 +15,15 @@ class DeepAppSecAgent:
     to perform deep task decomposition and remediation generation for high-risk flaws.
     """
 
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, workspace_path: str = None):
         """
         Sets up the agent with vector store access and run-specific artifact paths.
 
         Args:
             config_path (str): Configuration mapping for models and storage.
+            workspace_path (str, optional): Target workspace path under analysis. Defaults to None (current dir).
         """
+        self.workspace_path = os.path.abspath(workspace_path) if workspace_path else os.getcwd()
         try:
             with open(config_path, "r") as f:
                 self.config = json.load(f)
@@ -31,14 +33,15 @@ class DeepAppSecAgent:
             with open(root_config, "r") as f:
                 self.config = json.load(f)
 
-        self.vector_store = LocalVectorStore(config_path)
+        self.vector_store = LocalVectorStore(config_path, self.workspace_path)
 
         # Resolve the specific run directory for inputs and outputs
         self.run_id = os.getenv("GITHUB_SHA") or os.getenv("GITHUB_RUN_ID") or "local-dev-run"
         if not self.run_id.startswith("run_"):
             self.run_id = f"run_{self.run_id}"
             
-        self.artifact_dir = os.path.join(self.config["paths"]["workspace_root"], self.config["paths"]["artifacts_subdir"], self.run_id)
+        self.artifact_dir = os.path.join(self.workspace_path, self.config["paths"]["workspace_root"], self.config["paths"]["artifacts_subdir"], self.run_id)
+        os.makedirs(self.artifact_dir, exist_ok=True)
         
         # Initialize CodeBERT for feature extraction (embeddings)
         self.model_name = "microsoft/codebert-base"
@@ -151,5 +154,15 @@ class DeepAppSecAgent:
         print(f"[+] Consolidated remediation dossier archived securely inside: {report_path}")
 
 if __name__ == "__main__":
-    orchestrator_agent = DeepAppSecAgent("config.json")
+    import argparse
+    parser = argparse.ArgumentParser(description="CEVuD Stage 3 Reasoning Agent")
+    parser.add_argument("--config", default="config.json", help="Path to config.json")
+    parser.add_argument("--workspace", default=".", help="Path to the workspace codebase under analysis")
+    
+    args = parser.parse_args()
+    
+    orchestrator_agent = DeepAppSecAgent(
+        config_path=args.config,
+        workspace_path=args.workspace
+    )
     orchestrator_agent.execute_deep_analysis()

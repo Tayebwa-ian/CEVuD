@@ -16,13 +16,18 @@ class TriageOrchestrator:
     Stage 3 is necessary.
     """
 
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, workspace_path: str = None, exclude_prefixes: list = None):
         """
         Initializes the orchestrator, model, and artifact directories.
 
         Args:
             config_path (str): Path to configuration settings.
+            workspace_path (str, optional): Target workspace path under analysis. Defaults to None (current dir).
+            exclude_prefixes (list, optional): File path prefixes to exclude from scanning.
         """
+        self.workspace_path = os.path.abspath(workspace_path) if workspace_path else os.getcwd()
+        self.exclude_prefixes = exclude_prefixes if exclude_prefixes is not None else []
+
         # Load config with fallback to root if not found
         try:
             with open(config_path, "r") as f:
@@ -38,7 +43,9 @@ class TriageOrchestrator:
         if not self.run_id.startswith("run_"):
             self.run_id = f"run_{self.run_id}"
             
-        self.artifact_dir = os.path.join(self.config["paths"]["workspace_root"], self.config["paths"]["artifacts_subdir"], self.run_id)
+        # Target workspace storage is resolved relative to the target codebase workspace
+        self.workspace_root = os.path.join(self.workspace_path, self.config["paths"]["workspace_root"])
+        self.artifact_dir = os.path.join(self.workspace_root, self.config["paths"]["artifacts_subdir"], self.run_id)
         os.makedirs(self.artifact_dir, exist_ok=True)
 
         # Initialize CodeBERT for vulnerability classification
@@ -112,22 +119,27 @@ class TriageOrchestrator:
         """
         try:
             # Attempt to capture current local uncommitted/staged changes (Local Dev)
-            diff_content = subprocess.check_output(["git", "diff", "HEAD"], stderr=subprocess.STDOUT).decode()
+            diff_content = subprocess.check_output(
+                ["git", "diff", "HEAD"], cwd=self.workspace_path, stderr=subprocess.STDOUT
+            ).decode()
             
             # If the working tree is clean, fall back to comparing the last commit (Standard CI behavior)
             if not diff_content.strip():
-                diff_content = subprocess.check_output(["git", "diff", "HEAD~1", "HEAD"], stderr=subprocess.STDOUT).decode()
+                diff_content = subprocess.check_output(
+                    ["git", "diff", "HEAD~1", "HEAD"], cwd=self.workspace_path, stderr=subprocess.STDOUT
+                ).decode()
             
             if not diff_content.strip():
                 return []
 
-            parser = DiffParser(diff_content)
+            parser = DiffParser(diff_content, exclude_prefixes=self.exclude_prefixes)
             modified_map = parser.parse_modified_lines()
             
             all_impacted_functions = []
             for file_path, lines in modified_map.items():
-                if os.path.exists(file_path):
-                    with open(file_path, "r") as f:
+                full_file_path = os.path.join(self.workspace_path, file_path)
+                if os.path.exists(full_file_path):
+                    with open(full_file_path, "r", errors="ignore") as f:
                         content = f.read()
                         all_impacted_functions.extend(parser.get_functions_from_ast(content, lines))
             return all_impacted_functions
@@ -144,10 +156,17 @@ class TriageOrchestrator:
         semgrep_filename = self.config["paths"]["semgrep_output"]
         target_path = os.path.join(self.artifact_dir, semgrep_filename)
         
-        # Proactively move Stage 1 output to the run-specific directory if found in root
-        if os.path.exists(semgrep_filename) and not os.path.samefile(os.getcwd(), self.artifact_dir):
-            print(f"[*] Moving {semgrep_filename} to artifact directory: {self.artifact_dir}")
-            shutil.move(semgrep_filename, target_path)
+        # Resolve Semgrep path relative to current working directory or workspace path
+        semgrep_workspace_path = os.path.join(self.workspace_path, semgrep_filename)
+        if not os.path.exists(semgrep_workspace_path) and os.path.exists(semgrep_filename):
+            semgrep_workspace_path = semgrep_filename
+
+        # Proactively move Stage 1 output to the run-specific directory if found in workspace
+        if os.path.exists(semgrep_workspace_path):
+            # Check if source and dest are different before moving
+            if not os.path.exists(target_path) or not os.path.samefile(semgrep_workspace_path, target_path):
+                print(f"[*] Moving {semgrep_workspace_path} to artifact directory: {self.artifact_dir}")
+                shutil.move(semgrep_workspace_path, target_path)
             
         semgrep_path = target_path
         if not os.path.exists(semgrep_path):
@@ -227,5 +246,20 @@ class TriageOrchestrator:
         print(f"[+] Triage complete ({status}). Processed {len(finding_reports)} findings. Max Risk: {max_risk}. Report: {triage_path}")
 
 if __name__ == "__main__":
-    orchestrator = TriageOrchestrator("config.json")
+    import argparse
+    parser = argparse.ArgumentParser(description="CEVuD Triage Orchestrator")
+    parser.add_argument("--config", default="config.json", help="Path to config.json")
+    parser.add_argument("--workspace", default=".", help="Path to the workspace codebase under analysis")
+    parser.add_argument("--exclude-dirs", default="workspace_storage,tests", help="Comma-separated path prefixes to exclude from AST fallback scanning")
+    
+    args = parser.parse_args()
+    
+    # Parse exclude directory prefixes list
+    exclude_list = [p.strip() for p in args.exclude_dirs.split(",") if p.strip()]
+    
+    orchestrator = TriageOrchestrator(
+        config_path=args.config,
+        workspace_path=args.workspace,
+        exclude_prefixes=exclude_list
+    )
     orchestrator.process_pipeline()

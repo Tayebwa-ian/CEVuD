@@ -11,11 +11,27 @@ class LocalVectorStore:
     semantic search and RAG for the Stage 3 agent.
     """
 
-    def __init__(self, config_path: str):
-        with open(config_path, "r") as f:
-            config = json.load(f)
+    def __init__(self, config_path: str, workspace_path: str = None):
+        """
+        Initializes the LocalVectorStore client.
+
+        Args:
+            config_path (str): Path to the config file.
+            workspace_path (str, optional): Target workspace path. Defaults to None (current working dir).
+        """
+        self.workspace_path = os.path.abspath(workspace_path) if workspace_path else os.getcwd()
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+        except FileNotFoundError:
+            root_config = os.path.join(os.path.dirname(__file__), "..", "config.json")
+            with open(root_config, "r") as f:
+                config = json.load(f)
         
         db_dir = config["paths"]["vector_db_dir"]
+        if not os.path.isabs(db_dir):
+            db_dir = os.path.join(self.workspace_path, db_dir)
+            
         os.makedirs(db_dir, exist_ok=True)
         
         self.db_path = os.path.join(db_dir, "codebase_context.db")

@@ -39,6 +39,7 @@ httpx-sse==0.4.3
 huggingface_hub==1.19.0
 idna==3.18
 importlib_metadata==8.7.1
+iniconfig==2.3.0
 Jinja2==3.1.6
 jiter==0.15.0
 jsonpatch==1.33
@@ -95,6 +96,7 @@ ormsgpack==1.12.2
 packaging==26.2
 peewee==3.19.0
 pillow==12.2.0
+pluggy==1.6.0
 protobuf==6.33.6
 pyasn1==0.6.3
 pyasn1_modules==0.4.2
@@ -105,6 +107,7 @@ pydantic_core==2.46.4
 Pygments==2.20.0
 PyJWT==2.13.0
 pyparsing==3.3.2
+pytest==9.1.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 python-multipart==0.0.32

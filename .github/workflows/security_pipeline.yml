@@ -48,7 +48,7 @@ jobs:
           docker run --rm \
             -e GITHUB_RUN_ID="run_${{ github.sha }}" \
             -v ${{ github.workspace }}:/app/workspace \
-            appsec-pipeline:latest src/triage_orchestrator.py
+            appsec-pipeline:latest src/triage_orchestrator.py --workspace /app/workspace --exclude-dirs "workspace_storage,tests,src"
 
       - name: Execute Stage 3 (DeepAgent Context Analysis & Synthesis)
         if: always() # Allows internal scripts to decide termination rather than CI breaking early
@@ -62,12 +62,12 @@ jobs:
             -e ANTHROPIC_API_KEY \
             -e GOOGLE_API_KEY \
             -v ${{ github.workspace }}:/app/workspace \
-            appsec-pipeline:latest src/agent.py
+            appsec-pipeline:latest src/agent.py --workspace /app/workspace
 
       - name: Move Runtime Outputs to Systematic Artifact Cache Location
         if: always()
         run: |
-          [ -f stage1_2_triage.json ] && mv stage1_2_triage.json workspace_storage/artifacts/run_${{ github.sha }}/
+          [ -f stage1_2_triage.json ] && mv stage1_2_triage.json workspace_storage/artifacts/run_${{ github.sha }}/ || true
           [ -f remediation_dossier.md ] && mv remediation_dossier.md workspace_storage/artifacts/run_${{ github.sha }}/ || true
 
       - name: Archive Run-Specific Security Artifact Dossier

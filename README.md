@@ -37,24 +37,45 @@ CEVuD is a multi-stage security orchestration pipeline designed to identify vuln
 
 ## 📂 Project Structure
 
-- `src/diff_parser.py`: AST-based code extraction from git diffs.
-- `src/triage_orchestrator.py`: Mathematical gating logic and SLM inference.
-- `src/vector_store.py`: Local semantic index for cross-file context.
-- `src/agent.py`: The final stage reasoning engine.
-- `src/evaluate_pipeline.py`: Dynamic benchmark runner that executes live Semgrep scans on ledger snippets to verify real-world accuracy.
+- `src/diff_parser.py`: Decoupled AST-based code extraction from git diffs with custom exclusions.
+- `src/triage_orchestrator.py`: Mathematical gating logic accepting dynamic target workspaces.
+- `src/vector_store.py`: Persistent database client supporting dynamic workspace lookup and embeddings.
+- `src/agent.py`: Advanced agent runtime executing relative to targeted workspaces.
+- `src/evaluate_pipeline.py`: Benchmark runner.
+- `tests/test_pipeline.py`: Suite containing unit tests for AST parser, database store, and gating calculations.
 
 ## ⚙️ Quick Start
 
-1. **Setup (Benchmark):** `python src/dataset_ingest.py --mode benchmark --file src/data/gold_standard.json` (Creates `vulnerability_samples/`)
-2. **Setup (Full Repo):** `python src/dataset_ingest.py --mode repo --path ./my_project`
-2. **Benchmark:** `python src/evaluate_pipeline.py` to verify detection Recall/Precision.
-4. **Run Pipeline:**
-   ```bash
-   semgrep --config p/python --config ./semgrep_rules/custom_appsec_rules.yaml --exclude src --json --output semgrep_results.json vulnerability_samples/
-   python src/triage_orchestrator.py
-   python src/agent.py
-   ```
-3. **CI/CD:** Use `.github/workflows/security_pipeline.yml` for automated PR scanning.
+### 1. Run Unit Tests
+To verify all pipeline logic works correctly:
+```bash
+python -m pytest tests/test_pipeline.py
+```
+
+### 2. Scanning a Target Repository
+You can run the pipeline on an external codebase:
+```bash
+# 1. Generate static analysis findings in the target repo
+semgrep --config p/python --config ./semgrep_rules/custom_appsec_rules.yaml --json --output /path/to/target/semgrep_results.json /path/to/target
+
+# 2. Run Stage 2 Triage with custom exclusions and target workspace
+python src/triage_orchestrator.py --workspace /path/to/target --exclude-dirs "tests,workspace_storage"
+
+# 3. Run Stage 3 Deep Synthesis Agent
+python src/agent.py --workspace /path/to/target
+```
+
+### 3. CI/CD Integration (Option A: Reusable Workflow)
+Other codebases can scan their PRs using this central pipeline via the reusable workflow:
+```yaml
+jobs:
+  scan:
+    uses: Tayebwa-ian/CEVuD/.github/workflows/reusable_pipeline.yml@main
+    with:
+      exclude-dirs: "tests,workspace_storage"
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+```
 
 ## 🛠️ Roadmap
 - [ ] **CLI Packaging:** Transition to a `pip`-installable package with a `cevud` entry point.

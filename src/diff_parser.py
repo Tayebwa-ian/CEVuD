@@ -9,8 +9,17 @@ class DiffParser:
     to discrete function/method blocks.
     """
 
-    def __init__(self, diff_content: str):
+    def __init__(self, diff_content: str, exclude_prefixes: List[str] = None):
+        """
+        Initializes the DiffParser.
+
+        Args:
+            diff_content (str): The raw git diff output to parse.
+            exclude_prefixes (List[str], optional): Prefixes of file paths to exclude from analysis.
+                                                    Defaults to None.
+        """
         self.diff_content = diff_content
+        self.exclude_prefixes = exclude_prefixes if exclude_prefixes is not None else []
 
     def parse_modified_lines(self) -> Dict[str, Set[int]]:
         """
@@ -31,12 +40,14 @@ class DiffParser:
             file_match = file_re.match(line)
             if file_match:
                 current_file = file_match.group(1)
-                # Ignore pipeline source code and only focus on target app logic
-                if current_file.endswith(".py") and not current_file.startswith("src/"):
-                    modified_files[current_file] = set()
+                # Parse python files that do not match the exclusion rules
+                if current_file.endswith(".py"):
+                    should_exclude = any(current_file.startswith(p) for p in self.exclude_prefixes)
+                    if not should_exclude:
+                        modified_files[current_file] = set()
                 continue
 
-            if current_file and current_file.endswith(".py"):
+            if current_file and current_file.endswith(".py") and current_file in modified_files:
                 hunk_match = hunk_re.match(line)
                 if hunk_match:
                     current_line = int(hunk_match.group(1))

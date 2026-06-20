@@ -100,21 +100,22 @@ Where:
 - `/config.json`: Master orchestration configurations, weights, and model parameters.
 - `/requirements.txt`: Pinned version requirements optimized for Python 3.14.6 execution loops.
 - `/Dockerfile`: Clean multi-stage build blueprint that keeps deployment container profiles small.
-- `/.github/workflows/security_pipeline.yml`: The automation engine file that runs the pipeline, parses changes, and handles artifact retention.
-- `/src/diff_parser.py`: AST extraction component that finds modified functions in git patches.
-- `/src/triage_orchestrator.py`: The evaluation stage that combines Semgrep data with local model checks and evaluates the gating logic.
-- `/src/vector_store.py`: Local database client managing SQLite vector profiles.
-- `/src/llm_factory.py`: The model mapping manager that handles agnostic provider switching.
-- `/src/agent.py`: Advanced agent runtime using `deepagents` task structures to write the final remediation report.
-- `/src/evaluate_pipeline.py`: Performance benchmarking suite that measures Recall, Precision, and Token Reduction using real model inference.
-- `/src/data/gold_standard.json`: Ground truth dataset containing vulnerable and secure code pairs for benchmark validation.
-- `/src/dataset_ingest.py`: Multi-mode ingestion utility.
-    - **Mode A (Benchmark):** Loads CVE/fix pairs and materializes them into `vulnerability_samples/` for manual testing.
-    - **Mode B (Repository):** Crawls a codebase to build a semantic index for RAG-based analysis.
+- `/.github/workflows/security_pipeline.yml`: The automation engine file that runs local PR scans on this pipeline repository.
+- `/.github/workflows/reusable_pipeline.yml`: Reusable workflow (Option A) enabling external repositories to trigger CEVuD scans dynamically.
+- `/src/diff_parser.py`: Decoupled AST extraction utility supporting dynamic exclusions.
+- `/src/triage_orchestrator.py`: Mathematical gating logic accepting dynamic target `--workspace` and `--exclude-dirs` values.
+- `/src/vector_store.py`: Persistent database client supporting dynamic workspace lookup and embeddings.
+- `/src/llm_factory.py`: Agnostic LLM model switching wrapper.
+- `/src/agent.py`: Remediation synthesis engine running via task loops on dynamic target workspaces.
+- `/src/evaluate_pipeline.py`: Performance benchmarking suite.
+- `/src/data/gold_standard.json`: Ground truth CVE-fix pair ledger.
+- `/src/dataset_ingest.py`: Context database loader.
+- `/tests/test_pipeline.py`: Pytest verification suite testing AST extraction, DB insertions, and mathematical gating.
 
 ## 8. CLI & Distribution Roadmap
 To transition the pipeline from a CI-scripting project to a portable security utility:
-1. **Entry Points:** Implement a `click` or `typer` CLI to expose `cevud scan` and `cevud eval` commands.
-2. **Dynamic Configuration:** Move from a static `config.json` in the root to a prioritized search order: (CLI Flag > Environment Variable > `~/.cevud/config.json` > Default).
-3. **Asset Management:** Use `huggingface_hub` for managed CodeBERT weight downloads rather than local path assumptions.
-4. **Namespace Packaging:** Structure the `src` directory as a formal `cevud` package to handle cross-module imports reliably.
+1. **Target Agnosticism (Completed):** Implement dynamic directory parsing and git-working-directory isolation parameters.
+2. **Standard Test Coverage (Completed):** Incorporate a standard `pytest` coverage layout under `/tests` folder.
+3. **Entry Points:** Implement a `click` or `typer` CLI to expose `cevud scan` and `cevud eval` commands.
+4. **Asset Management:** Use `huggingface_hub` for managed CodeBERT weight downloads.
+5. **Namespace Packaging:** Structure the `src` directory as a formal `cevud` package.

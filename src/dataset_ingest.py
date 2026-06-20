@@ -81,10 +81,6 @@ class IngestManager:
                 embedding=vector
             )
         
-        # Save for evaluation script
-        os.makedirs("workspace_storage", exist_ok=True)
-        with open("workspace_storage/evaluation_ledger.json", "w") as f:
-            json.dump(test_suite, f, indent=2)
         print(f"[+] Successfully seeded {len(test_suite)} benchmark cases.")
 
     def ingest_repository(self, repo_path: str):
