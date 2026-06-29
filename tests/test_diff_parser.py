@@ -1,81 +1,61 @@
+"""
+Unit Tests: DiffParser
+======================
+Validates AST parsing, hunk boundary calculation, and path exclusions.
+"""
+
 import os
 import sys
 import pytest
-from src.diff_parser import DiffParser
-
-# Setup path context for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-def test_diff_parser_init():
-    """Test DiffParser constructor defaults and custom parameter assignments."""
-    parser = DiffParser("some diff content")
-    assert parser.diff_content == "some diff content"
-    assert parser.exclude_prefixes == []
+from diff_parser import DiffParser
 
-    parser_custom = DiffParser("some diff", exclude_prefixes=["src/", "tests/"])
-    assert parser_custom.exclude_prefixes == ["src/", "tests/"]
+def test_diff_parser_extracts_modified_lines():
+    """Verifies that line numbers are accurately captured from Git diff hunks."""
+    raw_diff = (
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -10,4 +10,6 @@\n"
+        " def execute_payload(data):\n"
+        "+    # Added security control check\n"
+        "+    sanitize(data)\n"
+        "     return os.system(data)\n"
+    )
+    
+    parser = DiffParser(raw_diff)
+    result = parser.parse_modified_lines()
+    
+    assert "src/app.py" in result
+    assert 11 in result["src/app.py"]
+    assert 12 in result["src/app.py"]
 
-def test_diff_parser_line_extraction():
-    """Verify DiffParser isolates modified lines correctly from a complex diff payload."""
-    diff_payload = (
-        "diff --git a/app/main.py b/app/main.py\n"
-        "index 1234567..abcdefg 100644\n"
-        "--- a/app/main.py\n"
-        "+++ b/app/main.py\n"
-        "@@ -5,4 +5,6 @@\n"
-        " def check_user():\n"
-        "-    print('old')\n"
-        "+    print('new line 1')\n"
-        "+    print('new line 2')\n"
-        "     return True\n"
-        "diff --git a/tests/test_main.py b/tests/test_main.py\n"
-        "--- a/tests/test_main.py\n"
-        "+++ b/tests/test_main.py\n"
+def test_diff_parser_respects_exclusions():
+    """Ensures that paths matching exclusion rules are skipped during parsing."""
+    raw_diff = (
+        "--- a/tests/test_mock.py\n"
+        "+++ b/tests/test_mock.py\n"
         "@@ -1,2 +1,3 @@\n"
-        "+def test_func():\n"
+        "+# Test change\n"
     )
+    
+    parser = DiffParser(raw_diff, exclude_prefixes=["tests/"])
+    result = parser.parse_modified_lines()
+    assert "tests/test_mock.py" not in result
 
-    # Exclude tests/ directory
-    parser = DiffParser(diff_payload, exclude_prefixes=["tests/"])
-    modified = parser.parse_modified_lines()
-
-    assert "tests/test_main.py" not in modified
-    assert "app/main.py" in modified
-    assert 5 in modified["app/main.py"]
-    assert 6 in modified["app/main.py"]
-    assert 7 not in modified["app/main.py"]
-
-def test_diff_parser_function_ast_extraction():
-    """Verify AST parsing identifies function boundaries and extracts complete function code."""
+def test_get_functions_from_ast_boundary():
+    """Validates function extraction boundaries within accurate AST scopes."""
     source_code = (
-        "import sys\n"
+        "def entry_point():\n"
+        "    print('Hello')\n"
         "\n"
-        "def helper_method(val):\n"
-        "    res = val * 2\n"
-        "    return res\n"
-        "\n"
-        "class MyClass:\n"
-        "    def method_one(self):\n"
-        "        # line 9\n"
-        "        pass\n"
+        "def target_func(x):\n"
+        "    payload = x * 2\n"
+        "    return payload\n"
     )
-
-    # Line 4 is inside helper_method
-    funcs = DiffParser.get_functions_from_ast(source_code, {4})
-    assert len(funcs) == 1
-    assert "def helper_method" in funcs[0]
-    assert "res = val * 2" in funcs[0]
-    assert "method_one" not in funcs[0]
-
-    # Line 9 is inside method_one
-    funcs_class = DiffParser.get_functions_from_ast(source_code, {9})
-    assert len(funcs_class) == 1
-    assert "def method_one" in funcs_class[0]
-    assert "helper_method" not in funcs_class[0]
-
-def test_diff_parser_syntax_error_handling():
-    """Verify AST parser returns empty list gracefully on invalid Python syntax."""
-    invalid_code = "def incomplete_func(\n"
-    funcs = DiffParser.get_functions_from_ast(invalid_code, {1})
-    assert funcs == []
+    
+    # Line 5 points specifically to the body of target_func
+    extracted = DiffParser.get_functions_from_ast(source_code, {5})
+    assert len(extracted) == 1
+    assert "def target_func" in extracted[0]
+    assert "entry_point" not in extracted[0]

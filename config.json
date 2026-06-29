@@ -1,8 +1,8 @@
 {
   "gate_parameters": {
-    "weight_static": 0.3,
-    "weight_slm": 0.7,
-    "escalation_threshold": 0.55
+    "weight_static": 0.4,
+    "weight_slm": 0.6,
+    "escalation_threshold": 0.52
   },
   "paths": {
     "workspace_root": "workspace_storage",

@@ -27,6 +27,7 @@ matplotlib.use("Agg")  # Non-interactive backend for CI/headless environments
 import matplotlib.pyplot as plt
 
 from triage_orchestrator import TriageOrchestrator
+from vector_store import LocalVectorStore
 
 
 # ---------------------------------------------------------------------------
@@ -74,15 +75,26 @@ class PipelineEvaluator:
 
         # Instantiate the real orchestrator so we can call slm_inference()
         self.orchestrator = TriageOrchestrator(config_path)
+        self.vector_store = LocalVectorStore(config_path)
 
-        # Create a timestamped evaluation directory for this run
+        # Create a timestamped evaluation directory for this run.
+        # workspace_root and evaluations_subdir may both be absolute (test config)
+        # or relative (production config) - handle both cases.
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.eval_id = f"eval_{timestamp}"
-        self.eval_dir = os.path.join(
-            self.config["paths"]["workspace_root"],
-            self.config["paths"]["evaluations_subdir"],
-            self.eval_id,
-        )
+        ws_root = self.config["paths"]["workspace_root"]
+        evals_sub = self.config["paths"]["evaluations_subdir"]
+
+        if os.path.isabs(evals_sub):
+            # evaluations_subdir is already absolute (test config)
+            self.eval_dir = os.path.join(evals_sub, self.eval_id)
+        elif os.path.isabs(ws_root):
+            # workspace_root is absolute, evaluations_subdir is relative to it
+            self.eval_dir = os.path.join(ws_root, evals_sub, self.eval_id)
+        else:
+            # Both relative — join with cwd (production default)
+            self.eval_dir = os.path.join(ws_root, evals_sub, self.eval_id)
+
         os.makedirs(self.eval_dir, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -94,14 +106,21 @@ class PipelineEvaluator:
         Write each gold-standard snippet to its own ``.py`` file so that
         Semgrep can perform a real filesystem scan.
 
+        IMPORTANT: Files are written to a ``tempfile.mkdtemp()`` directory
+        **outside the project tree** (e.g. ``/tmp/cevud_bench_XXXX``).
+        This guarantees that Semgrep's ``.gitignore`` / ``.semgrepignore``
+        integration — which would otherwise silently skip files nested under
+        ``workspace_storage/`` — cannot block the scan.
+
         Args:
             test_cases: List of dicts from ``gold_standard.json``.
 
         Returns:
             Absolute path to the temporary directory containing the files.
         """
-        temp_src_dir = os.path.join(self.eval_dir, "transient_benchmarks")
-        os.makedirs(temp_src_dir, exist_ok=True)
+        import tempfile
+        # Write outside the project tree so .gitignore/.semgrepignore never applies
+        temp_src_dir = tempfile.mkdtemp(prefix="cevud_bench_")
 
         for i, case in enumerate(test_cases):
             safe_fn = case["function_name"].replace(" ", "_")
@@ -109,6 +128,7 @@ class PipelineEvaluator:
             with open(os.path.join(temp_src_dir, file_name), "w") as f:
                 f.write(case["source_code"])
 
+        print(f"[*] Benchmark files materialised to: {temp_src_dir}")
         return temp_src_dir
 
     def _run_live_semgrep(self, target_dir: str) -> dict:
@@ -130,16 +150,24 @@ class PipelineEvaluator:
             base_dir, "semgrep_rules", "custom_appsec_rules.yaml"
         )
 
+        # Find all python files to scan. Passing files directly to Semgrep
+        # bypasses its default ignore patterns (like excluding directories named "tests")
+        target_files = [
+            os.path.join(target_dir, f)
+            for f in os.listdir(target_dir)
+            if f.endswith(".py")
+        ]
+
         cmd = [
             "semgrep",
             "--config", "p/python",
             "--config", custom_rules_path,
+            "--no-git-ignore",
             "--json",
             "--output", output_path,
-            target_dir,
-        ]
+        ] + target_files
 
-        print(f"[*] Executing Stage 1 live scan on {target_dir}...")
+        print(f"[*] Executing Stage 1 live scan on {len(target_files)} benchmark files...")
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
@@ -185,11 +213,17 @@ class PipelineEvaluator:
         try:
             semgrep_results = self._run_live_semgrep(bench_dir)
 
-            # Build a lookup: benchmark filename → Semgrep severity string
+            # Build a lookup: benchmark filename → highest Semgrep severity string.
+            # A file may match multiple rules; we keep the worst (highest weight) result.
+            _sev_rank = {"ERROR": 3, "WARNING": 2, "INFO": 1, "NONE": 0}
             findings_map: Dict[str, str] = {}
             for res in semgrep_results.get("results", []):
                 fname = os.path.basename(res["path"])
-                findings_map[fname] = res["extra"]["severity"]
+                sev = res["extra"]["severity"]
+                # Only promote, never demote
+                if _sev_rank.get(sev, 0) > _sev_rank.get(findings_map.get(fname, "NONE"), 0):
+                    findings_map[fname] = sev
+            print(f"[*] Semgrep matched {len(findings_map)} unique benchmark files.")
 
             # --- Confusion matrix accumulators ---
             tp = fp = fn = tn = 0
@@ -209,8 +243,20 @@ class PipelineEvaluator:
                 sev_str = findings_map.get(target_fname, "NONE")
                 s_sev = self.config["semgrep_severity_map"].get(sev_str, 0.0)
 
-                # 2. Run real CodeBERT inference on the source code
-                p_slm = self.orchestrator.slm_inference(case["source_code"])
+                # --------------------------------------------------------------
+                # Context-Aware Window Extension
+                # Trace upstream callers and downstream sinks to build a multi-file window
+                # --------------------------------------------------------------
+                context_blocks = self.vector_store.get_explicit_flow_context(case["function_name"])
+                
+                # Pre-populate the input window with the target modification snippet
+                unified_source_window = case["source_code"]
+                for block in context_blocks:
+                    unified_source_window += f"\n# Context Flow Lineage from File: {block['file_path']}\n"
+                    unified_source_window += block['source_code']
+
+                # 2. Run real CodeBERT inference on the expanded, unified source window
+                p_slm = self.orchestrator.slm_inference(unified_source_window)
 
                 # 3. Apply the gating formula: R = (W1 × S_sev) + (W2 × P_slm)
                 risk_score = (self.w1 * s_sev) + (self.w2 * p_slm)

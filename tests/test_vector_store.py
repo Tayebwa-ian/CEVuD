@@ -4,10 +4,10 @@ import json
 import tempfile
 import shutil
 import pytest
-from src.vector_store import LocalVectorStore
-
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from vector_store import LocalVectorStore
 
 @pytest.fixture
 def temp_workspace():

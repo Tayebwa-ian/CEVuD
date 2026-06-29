@@ -64,7 +64,7 @@ jobs:
           docker run --rm \
             -v ${{ github.workspace }}:/workspace \
             appsec-pipeline:latest \
-            -m semgrep.cli --config=p/python --config=/app/semgrep_rules/custom_appsec_rules.yaml --exclude src --exclude workspace_storage --exclude cevud-scanner --json --output=/workspace/semgrep_results.json /workspace
+            -m semgrep.cli --config=p/python --config=/app/semgrep_rules/custom_appsec_rules.yaml --no-git-ignore --exclude src --exclude workspace_storage --exclude cevud-scanner --json --output=/workspace/semgrep_results.json /workspace
 
       - name: Execute Stage 2 (Local SLM Mathematical Gating)
         env:

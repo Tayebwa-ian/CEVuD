@@ -6,8 +6,9 @@ __pycache__/
 semgrep_results.json
 stage1_2_triage.json
 vulnerability_samples/
-workspace_storage/
-research_outline.md
 skills/
 .agents
-
+ms.md
+.pytest*
+test_config_manifest.json
+unit_test_config_manifest.json

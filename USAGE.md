@@ -27,7 +27,7 @@ Before running the pipeline, you must populate the `LocalVectorStore`.
 
 *   **Benchmark Mode:** Seed the DB and deploy code samples for manual testing.
     ```bash
-    python src/dataset_ingest.py --mode benchmark --file src/data/gold_standard.json
+    python src/dataset_ingest.py --mode benchmark --file tests/data/gold_standard.json
     ```
     *This creates a `vulnerability_samples/` directory containing the test code.*
 
@@ -101,7 +101,7 @@ After the workflow completes:
 ## 3. Running Unit Tests
 To run the automated pytest suite that validates AST extraction, gating calculations, and vector store relational lookups, execute:
 ```bash
-python -m pytest tests/test_pipeline.py
+python -m pytest tests/
 ```
 
 ---
@@ -110,7 +110,7 @@ python -m pytest tests/test_pipeline.py
 To measure the **Recall** and **Token Reduction Rate (TRR)** without running a full pipeline:
 1. Seed the benchmark data:
     ```bash
-    python src/dataset_ingest.py --mode benchmark --file src/data/gold_standard.json
+    python src/dataset_ingest.py --mode benchmark --file tests/data/gold_standard.json
     ```
 2. Run the evaluator:
    ```bash

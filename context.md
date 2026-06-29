@@ -90,8 +90,8 @@ $$R = (W_1 \cdot S_{\text{sev}}) + (W_2 \cdot P_{\text{slm}})$$
 Where:
 - $S_{\text{sev}}$ is the Semgrep severity score (`INFO` = 0.3, `WARNING` = 0.7, `ERROR` = 1.0).
 - $P_{\text{slm}}$ is the local ONNX model's classification probability output.
-- $W_1 = 0.3$ and $W_2 = 0.7$ represent the default operational weights (optimized for SLM-heavy gating).
-- If $R \ge 0.55$, trigger Stage 3. Otherwise, log the result and terminate cleanly to save tokens.
+- $W_1 = 0.4$ and $W_2 = 0.6$ represent the default operational weights (optimized for SLM-heavy gating).
+- If $R \ge 0.52$, trigger Stage 3. Otherwise, log the result and terminate cleanly to save tokens.
 **Escalation Logic:** If *any* individual finding's risk score ($R$) meets or exceeds the threshold, *all* high-risk findings are passed to Stage 3.
 **Fail-Safe Logic:** If Semgrep returns zero findings, $W_1$ is set to $0.0$ and the pipeline evaluates the modified code diff directly via the SLM.
 
@@ -108,9 +108,26 @@ Where:
 - `/src/llm_factory.py`: Agnostic LLM model switching wrapper.
 - `/src/agent.py`: Remediation synthesis engine running via task loops on dynamic target workspaces.
 - `/src/evaluate_pipeline.py`: Performance benchmarking suite.
-- `/src/data/gold_standard.json`: Ground truth CVE-fix pair ledger.
+- `/tests/data/gold_standard.json`: Ground truth CVE-fix pair ledger.
 - `/src/dataset_ingest.py`: Context database loader.
-- `/tests/test_pipeline.py`: Pytest verification suite testing AST extraction, DB insertions, and mathematical gating.
+- `/tests/`: Pytest verification suite testing AST extraction, DB insertions, and mathematical gating.
+
+### 7.1 Gold Standard Dataset Sources
+The benchmark dataset used to compute pipeline metrics is located in `tests/data/gold_standard.json` and contains curated Python function code patterns modeling real-world vulnerability types. These patterns are derived from:
+- **OWASP Python Security Cheat Sheet** and guidelines (e.g., Injection prevention, deserialization safety).
+- **Common Weakness Enumerations (CWEs)**:
+  - CWE-89: SQL Injection (SQLi)
+  - CWE-502: Deserialization of Untrusted Data
+  - CWE-78: OS Command Injection
+  - CWE-22: Path Traversal / Zip Slip
+  - CWE-79: Cross-Site Scripting (XSS)
+  - CWE-918: Server-Side Request Forgery (SSRF)
+  - CWE-287: Improper Authentication / IDOR
+  - CWE-327: Use of a Broken or Risky Cryptographic Algorithm
+  - CWE-601: URL Redirection to Insecure Site ('Open Redirect')
+  - CWE-117: Improper Output Sanitization for Logs (Log Injection)
+- Standard secure coding patterns defined in **Bandit** security linter rules and **Snyk Code Advisor**.
+
 
 ## 8. CLI & Distribution Roadmap
 To transition the pipeline from a CI-scripting project to a portable security utility:

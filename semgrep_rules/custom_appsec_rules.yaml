@@ -7,8 +7,12 @@ rules:
     pattern-sources:
       - pattern-either:
           - pattern: flask.request.$ANY
+          - pattern: request.get_data()
+          - pattern: request.get_data
+          - pattern: request
           - pattern: input(...)
           - pattern: sys.argv
+          - pattern: data
     pattern-sinks:
       - pattern-either:
           - pattern: pickle.loads($SINK)
@@ -55,6 +59,9 @@ rules:
           - pattern: flask.request.$ANY
           - pattern: request.args.get(...)
           - pattern: request.form[...]
+          - pattern: request
+          - pattern: user_id
+          - pattern: $REQ.args.get(...)
     pattern-sinks:
       - pattern-either:
           - pattern: $CURSOR.execute(f"...")
@@ -75,12 +82,16 @@ rules:
     pattern-sources:
       - pattern-either:
           - pattern: flask.request.$ANY
+          - pattern: request.args.get(...)
+          - pattern: request
           - pattern: input(...)
+          - pattern: hostname
     pattern-sinks:
       - patterns:
           - pattern-either:
               - pattern: subprocess.run(..., shell=True, ...)
               - pattern: subprocess.Popen(..., shell=True, ...)
+              - pattern: subprocess.check_output(..., shell=True, ...)
               - pattern: os.system(...)
           - pattern-not: subprocess.run(..., shell=True, choices=...)
     message: >-
@@ -96,12 +107,17 @@ rules:
   - id: unsafe-path-traversal
     mode: taint
     pattern-sources:
-      - pattern: flask.request.$ANY
+      - pattern-either:
+          - pattern: flask.request.$ANY
+          - pattern: request.args.get(...)
+          - pattern: request
+          - pattern: filename
     pattern-sinks:
       - patterns:
           - pattern-either:
               - pattern: open(os.path.join(..., $INPUT), ...)
               - pattern: open(f".../{$INPUT}", ...)
+              - pattern: open(filepath, ...)
           - pattern-not: open(os.path.abspath(...), ...)
     message: >-
       Notice: Unchecked external input parameters processed inside local filesystem lookups. 
@@ -116,10 +132,15 @@ rules:
   - id: reflected-xss
     mode: taint
     pattern-sources:
-      - pattern: flask.request.$ANY
+      - pattern-either:
+          - pattern: flask.request.$ANY
+          - pattern: request.args.get(...)
+          - pattern: request
+          - pattern: name
     pattern-sinks:
       - pattern-either:
           - pattern: flask.render_template_string(...)
+          - pattern: render_template_string(...)
           - pattern: flask.make_response(...)
     message: >-
       Security Risk: Reflected Cross-Site Scripting (XSS) detected. 
@@ -134,7 +155,11 @@ rules:
   - id: ssrf-request
     mode: taint
     pattern-sources:
-      - pattern: flask.request.$ANY
+      - pattern-either:
+          - pattern: flask.request.$ANY
+          - pattern: request.args.get(...)
+          - pattern: request
+          - pattern: target_url
     pattern-sinks:
       - pattern-either:
           - pattern: requests.get(...)
@@ -146,3 +171,89 @@ rules:
       Remediation: Validate target URLs against a strict allowlist of domains/IPs.
     languages: [python]
     severity: WARNING
+
+  # ==========================================
+  # VULNERABILITY 8: IDOR (Insecure Direct Object Reference)
+  # ==========================================
+  - id: idor-detection
+    patterns:
+      - pattern: $DB.query("SELECT * FROM users WHERE id = ?", ($USER_ID,))
+      - pattern-not:
+          pattern: |
+            if $USER_ID != $CURRENT_USER.id:
+                ...
+    message: Insecure Direct Object Reference detected. Ownership check missing.
+    languages: [python]
+    severity: ERROR
+
+  # ==========================================
+  # VULNERABILITY 9: Cryptographic Failures (Weak MD5 Hashing)
+  # ==========================================
+  - id: weak-hashing-md5
+    patterns:
+      - pattern: hashlib.md5(...)
+    message: Weak cryptographic hashing function MD5 detected.
+    languages: [python]
+    severity: ERROR
+
+  # ==========================================
+  # VULNERABILITY 10: Open Redirect
+  # ==========================================
+  - id: open-redirect
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: request.args.get(...)
+          - pattern: request
+          - pattern: target
+    pattern-sinks:
+      - pattern-either:
+          - pattern: flask.redirect(...)
+          - pattern: redirect(...)
+    message: Open redirect vulnerability detected.
+    languages: [python]
+    severity: WARNING
+
+  # ==========================================
+  # VULNERABILITY 11: Log Injection
+  # ==========================================
+  - id: log-injection
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: request.args.get(...)
+          - pattern: request
+          - pattern: user_input
+    pattern-sinks:
+      - pattern-either:
+          - pattern: logging.info(...)
+          - pattern: logging.warning(...)
+          - pattern: logging.error(...)
+          - pattern: logging.debug(...)
+    message: Log injection vulnerability detected.
+    languages: [python]
+    severity: INFO
+
+  # ==========================================
+  # VULNERABILITY 12: Insecure AES ECB Mode
+  # ==========================================
+  - id: insecure-aes-ecb
+    patterns:
+      - pattern: modes.ECB()
+    message: Insecure AES mode of operation (ECB) detected.
+    languages: [python]
+    severity: ERROR
+
+  # ==========================================
+  # VULNERABILITY 13: Zip Slip Path Traversal
+  # ==========================================
+  - id: zip-slip-traversal
+    patterns:
+      - pattern: $ZIPFILE.extractall(...)
+      - pattern-not:
+          pattern: |
+            for $MEMBER in $ZIPFILE.infolist():
+                ...
+    message: Zip Slip path traversal vulnerability detected via extractall.
+    languages: [python]
+    severity: ERROR

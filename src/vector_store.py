@@ -38,7 +38,7 @@ class LocalVectorStore:
         self._initialize_database()
 
     def _initialize_database(self) -> None:
-        """Constructs the standard schema foundations for storing code structures."""
+        """Constructs relational schema foundations with relational call-graph dimensions."""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS codebase_embeddings (
@@ -46,10 +46,13 @@ class LocalVectorStore:
                     file_path TEXT NOT NULL,
                     function_name TEXT NOT NULL,
                     source_code TEXT NOT NULL,
-                    embedding_blob BLOB NOT NULL
+                    embedding_blob BLOB NOT NULL,
+                    calls_out TEXT,  -- JSON string array of invoked functions
+                    calls_in TEXT    -- JSON string array of dependent upstream callers
                 );
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_file_lookup ON codebase_embeddings(file_path);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_func_lookup ON codebase_embeddings(function_name);")
 
     @staticmethod
     def _serialize_vector(vector: List[float]) -> bytes:
@@ -79,13 +82,19 @@ class LocalVectorStore:
             return 0.0
         return dot_product / (norm_a * norm_b)
 
-    def insert_code_block(self, file_path: str, func_name: str, source: str, embedding: List[float]) -> None:
-        """Saves a code block along with its vector signature to the local index."""
+    def insert_code_block(self, file_path: str, func_name: str, source: str, 
+                          embedding: List[float], calls_out: List[str] = None, 
+                          calls_in: List[str] = None) -> None:
+        """Saves a code block along with its vector signature and static call arrays."""
         blob = self._serialize_vector(embedding)
+        c_out = json.dumps(calls_out or [])
+        c_in = json.dumps(calls_in or [])
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "INSERT INTO codebase_embeddings (file_path, function_name, source_code, embedding_blob) VALUES (?, ?, ?, ?)",
-                (file_path, func_name, source, blob)
+                """INSERT INTO codebase_embeddings 
+                   (file_path, function_name, source_code, embedding_blob, calls_out, calls_in) 
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (file_path, func_name, source, blob, c_out, c_in)
             )
 
     def query_cross_file_context(self, query_embedding: List[float], limit: int = 2) -> List[Dict[str, Any]]:
@@ -100,17 +109,53 @@ class LocalVectorStore:
         """
         results = []
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT file_path, function_name, source_code, embedding_blob FROM codebase_embeddings")
-            for file_path, func_name, source, blob in cursor.fetchall():
+            cursor = conn.execute("SELECT file_path, function_name, source_code, embedding_blob, calls_out, calls_in FROM codebase_embeddings")
+            for file_path, func_name, source, blob, c_out, c_in in cursor.fetchall():
                 db_vector = self._deserialize_vector(blob)
                 similarity = self._compute_cosine_similarity(query_embedding, db_vector)
                 results.append({
                     "file_path": file_path,
                     "function_name": func_name,
                     "source_code": source,
-                    "similarity": similarity
+                    "similarity": similarity,
+                    "calls_out": json.loads(c_out),
+                    "calls_in": json.loads(c_in)
                 })
         
         # Sort by closest match descending
         results.sort(key=lambda x: x["similarity"], reverse=True)
         return results[:limit]
+    
+    def get_explicit_flow_context(self, function_name: str) -> List[Dict[str, Any]]:
+        """Retrieves direct callers and callees crossing file boundaries via graph links."""
+        context_nodes = []
+        with sqlite3.connect(self.db_path) as conn:
+            # Step A: Locate target function data
+            cursor = conn.execute(
+                "SELECT calls_out, calls_in FROM codebase_embeddings WHERE function_name = ?", (function_name,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return []
+            
+            calls_out = json.loads(row[0])
+            calls_in = json.loads(row[1])
+            
+            # Step B: Hydrate nodes
+            all_targets = list(set(calls_out + calls_in))
+            if not all_targets:
+                return []
+                
+            placeholders = ",".join(["?"] * len(all_targets))
+            cursor = conn.execute(
+                f"SELECT file_path, function_name, source_code FROM codebase_embeddings WHERE function_name IN ({placeholders})",
+                all_targets
+            )
+            for file_path, fn_name, source in cursor.fetchall():
+                context_nodes.append({
+                    "file_path": file_path,
+                    "function_name": fn_name,
+                    "source_code": source,
+                    "relationship": "upstream-caller" if fn_name in calls_in else "downstream-sink"
+                })
+        return context_nodes

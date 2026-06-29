@@ -1,265 +1,236 @@
-import json
 import os
+import json
+import ast
 import shutil
-import sys
-import subprocess
-from typing import Dict, Any
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from diff_parser import DiffParser
 
 class TriageOrchestrator:
     """
-    Core Orchestration Logic for Stages 1 and 2.
-    It consumes Semgrep results, runs semantic inference via CodeBERT, 
-    and applies a weighted risk formula to decide if an escalation to 
-    Stage 3 is necessary.
+    Orchestrates the Stage 2 triage workflow by parsing static analysis findings,
+    extracting pristine source code blocks directly from the repository filesystem context,
+    scoring snippets independently via a fine-tuned Small Language Model (SLM), and combining 
+    the distinct security telemetry points into a unified risk dossier.
     """
 
-    def __init__(self, config_path: str, workspace_path: str = None, exclude_prefixes: list = None):
+    def __init__(self, config_path: str, workspace_path: str = None):
         """
-        Initializes the orchestrator, model, and artifact directories.
+        Initializes configuration environments, path routing blocks, and security models.
 
         Args:
-            config_path (str): Path to configuration settings.
-            workspace_path (str, optional): Target workspace path under analysis. Defaults to None (current dir).
-            exclude_prefixes (list, optional): File path prefixes to exclude from scanning.
+            config_path (str): File system path to the main test manifest configuration.
+            workspace_path (str, optional): Target directory path of the codebase under analysis.
         """
-        self.workspace_path = os.path.abspath(workspace_path) if workspace_path else os.getcwd()
-        self.exclude_prefixes = exclude_prefixes if exclude_prefixes is not None else []
+        with open(config_path, "r") as f:
+            self.config = json.load(f)
 
-        # Load config with fallback to root if not found
-        try:
-            with open(config_path, "r") as f:
-                self.config = json.load(f)
-        except FileNotFoundError:
-            # Fallback for local development if run from different subdirs
-            root_config = os.path.join(os.path.dirname(__file__), "..", "config.json")
-            with open(root_config, "r") as f:
-                self.config = json.load(f)
-        
-        # Determine Run ID and Artifact Directory
-        self.run_id = os.getenv("GITHUB_SHA") or os.getenv("GITHUB_RUN_ID") or "local-dev-run"
-        if not self.run_id.startswith("run_"):
-            self.run_id = f"run_{self.run_id}"
-            
-        # Target workspace storage is resolved relative to the target codebase workspace
-        self.workspace_root = os.path.join(self.workspace_path, self.config["paths"]["workspace_root"])
-        self.artifact_dir = os.path.join(self.workspace_root, self.config["paths"]["artifacts_subdir"], self.run_id)
-        os.makedirs(self.artifact_dir, exist_ok=True)
+        # Establish base root context coordinates
+        self.workspace_path = workspace_path or self.config["paths"].get("workspace_root", ".")
+        self.artifact_dir = os.path.join(self.workspace_path, self.config["paths"]["artifacts_subdir"], "run_local-dev-run")
 
-        # Initialize CodeBERT for vulnerability classification
-        # Using a model head fine-tuned for defect detection/security analysis
-        self.model_name = "microsoft/codebert-base" 
+        # Initialize the target sequence classifier model checkpoint
+        self.model_name = "jayansh21/codesheriff-bug-classifier"
+        print(f"[*] Initializing Security SLM Classifier: {self.model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name, num_labels=2)
-        self.model.eval()
+        self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
+
+    def extract_source_snippet(self, file_path: str, start_line: int, end_line: int) -> str:
+        """
+        Parses a physical source file into an Abstract Syntax Tree (AST) to identify
+        and extract the complete, unbroken function block containing the matched lines.
+        
+        Ensures input context parity with the evaluation pipeline.
+
+        Args:
+            file_path (str): Relative or absolute target file path to parse.
+            start_line (int): The starting line pointer from Semgrep (1-indexed).
+            end_line (int): The ending line pointer from Semgrep (1-indexed).
+
+        Returns:
+            str: Clean, complete function string block starting at 'def ' and ending at scope close.
+        """
+        resolved_path = file_path if os.path.isabs(file_path) else os.path.join(self.workspace_path, file_path)
+        
+        if not os.path.exists(resolved_path):
+            print(f"[!] Warning: Source file missing during extraction: {resolved_path}")
+            return ""
+
+        try:
+            with open(resolved_path, "r", encoding="utf-8") as source_file:
+                source_code = source_file.read()
+                file_lines = source_code.splitlines()
+
+            # Build the Abstract Syntax Tree from the target file source
+            tree = ast.parse(source_code, filename=resolved_path)
+            
+            target_function_node = None
+            
+            # Walk through all nodes inside the syntax tree structure
+            for node in ast.walk(tree):
+                # Target both standard functions and async class/module methods
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # Check if Semgrep's match line sits securely inside this function's block limits
+                    # Note: node.end_lineno is supported natively in Python 3.8+
+                    if node.lineno <= start_line <= node.end_lineno:
+                        target_function_node = node
+                        break # Exact matching functional scope located
+
+            # If a valid function envelope is found, slice the exact node layout lines
+            if target_function_node:
+                # AST line offsets are 1-indexed; convert to 0-indexed slice bounds
+                slice_start = target_function_node.lineno - 1
+                slice_end = target_function_node.end_lineno
+                
+                # Reconstruct the pristine functional unit block string
+                pristine_function = "\n".join(file_lines[slice_start:slice_end])
+                return pristine_function.strip()
+                
+            # Fallback: If the finding is at a module level (outside a function), slice standard boundaries
+            print(f"[*] Match line {start_line} outside function scope. Falling back to line slice.")
+            slice_start = max(0, start_line - 1)
+            slice_end = min(len(file_lines), end_line)
+            return "\n".join(file_lines[slice_start:slice_end]).strip()
+
+        except Exception as err:
+            print(f"[!] AST parsing or slice exception on target asset file: {err}")
+            return ""
 
     def slm_inference(self, code_snippet: str) -> float:
         """
-        Predicts the probability of code being vulnerable using a local SLM.
+        Executes independent local forward-pass tokenization and inference 
+        over raw text data to map real threat probabilities.
 
         Args:
-            code_snippet (str): The source code to analyze.
-        
+            code_snippet (str): Pristine code snippet source context string.
+
         Returns:
-            float: Probability score between 0.0 and 1.0.
+            float: Distributed risk scale soft probability bound ranging between [0.0, 1.0].
         """
-        # Tokenize the input code snippet with standard CodeBERT max length
-        inputs = self.tokenizer(code_snippet, return_tensors="pt", truncation=True, padding=True, max_length=512)
+        if not code_snippet.strip():
+            return 0.0
+
+        # Encode input code string matching base tokenization model thresholds
+        inputs = self.tokenizer(
+            code_snippet, 
+            return_tensors="pt", 
+            truncation=True, 
+            max_length=512
+        )
         
         with torch.no_grad():
             outputs = self.model(**inputs)
-            # Apply Softmax to get probabilities for [Non-Vulnerable, Vulnerable]
-            probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
-        
-        # Extract the 'Vulnerable' class probability (index 1)
-        threat_probability = probs[0][1].item()
-        
-        # Ensure we return a float for the gating logic
-        return round(float(threat_probability), 4)
+            # Map raw logits to a soft probability distribution curve via spatial softmax activation
+            probabilities = torch.softmax(outputs.logits, dim=1).flatten()
+            
+        # Target Index 1 returns the explicit positive class continuous scalar distribution
+        return round(probabilities[1].item(), 4)
 
-    def evaluate_gate(self, semgrep_severity: str, slm_score: float) -> Dict[str, Any]:
+    def evaluate_gate(self, semgrep_severity: str, slm_score: float) -> dict:
         """
-        Applies the weighted gating formula: R = (W1 * S_sev) + (W2 * P_slm).
+        Combines isolated telemetry signals from Stage 1 and Stage 2 
+        into a composite risk score matrix.
 
         Args:
-            semgrep_severity (str): Severity label from Semgrep (ERROR, WARNING, INFO, NONE).
-            slm_score (float): Probability score from the CodeBERT model.
+            semgrep_severity (str): The raw diagnostic classification level from the static engine.
+            slm_score (float): Independent soft probability generated by the neural network block.
 
         Returns:
-            Dict[str, Any]: Combined risk score and escalation decision.
+            dict: Structured results matching the exact schema requirements of process_pipeline.
         """
-        weights = self.config["gate_parameters"]
-        sev_map = self.config["semgrep_severity_map"]
-
-        w1 = weights["weight_static"] if semgrep_severity != "NONE" else 0.0
-        w2 = weights["weight_slm"]
-        s_sev = sev_map.get(semgrep_severity, 0.3)
-        p_slm = slm_score
-
-        # Calculate combined risk index
-        risk_score = (w1 * s_sev) + (w2 * p_slm)
-        escalate = risk_score >= weights["escalation_threshold"]
-
+        # Map configured weightings from the environment manifest config
+        severity_weight = self.config["semgrep_severity_map"].get(semgrep_severity, 0.0)
+        w1 = self.config["gate_parameters"]["weight_static"]
+        w2 = self.config["gate_parameters"]["weight_slm"]
+        
+        # Calculate final continuous risk boundary parameters
+        risk_score = (w1 * severity_weight) + (w2 * slm_score)
+        escalate = risk_score >= self.config["gate_parameters"]["escalation_threshold"]
+        
         return {
-            "risk_score": round(risk_score, 3),
+            "risk_score": round(risk_score, 4),
             "escalate": escalate,
             "metrics": {
-                "static_severity_weight": s_sev,
-                "slm_probability_score": p_slm
+                "static_severity_weight": round(severity_weight, 4),
+                "slm_probability_score": round(slm_score, 4)
             }
         }
 
-    def _get_fallback_snippets(self) -> list:
-        """
-        Fail-safe mechanism: Extracts code snippets from the git diff 
-        when static analysis fails to find a match. This ensures 
-        Stage 2 always has context to analyze.
-        """
-        try:
-            # Attempt to capture current local uncommitted/staged changes (Local Dev)
-            diff_content = subprocess.check_output(
-                ["git", "diff", "HEAD"], cwd=self.workspace_path, stderr=subprocess.STDOUT
-            ).decode()
-            
-            # If the working tree is clean, fall back to comparing the last commit (Standard CI behavior)
-            if not diff_content.strip():
-                diff_content = subprocess.check_output(
-                    ["git", "diff", "HEAD~1", "HEAD"], cwd=self.workspace_path, stderr=subprocess.STDOUT
-                ).decode()
-            
-            if not diff_content.strip():
-                return []
-
-            parser = DiffParser(diff_content, exclude_prefixes=self.exclude_prefixes)
-            modified_map = parser.parse_modified_lines()
-            
-            all_impacted_functions = []
-            for file_path, lines in modified_map.items():
-                full_file_path = os.path.join(self.workspace_path, file_path)
-                if os.path.exists(full_file_path):
-                    with open(full_file_path, "r", errors="ignore") as f:
-                        content = f.read()
-                        all_impacted_functions.extend(parser.get_functions_from_ast(content, lines))
-            return all_impacted_functions
-        except Exception as e:
-            print(f"[!] Fallback snippet extraction failed: {e}")
-            return []
-
     def process_pipeline(self):
         """
-        Main execution flow for Stage 2.
-        Manages file movements, parses Semgrep JSON, runs inference, 
-        and writes the standardized triage report.
+        Main orchestration execution loop. Decouples structural data streams 
+        by using Semgrep solely for file coordinates while reading code 
+        blocks directly from the physical codebase. Writes out the final consolidated 
+        stage1_2_triage.json dossier file.
         """
         semgrep_filename = self.config["paths"]["semgrep_output"]
         target_path = os.path.join(self.artifact_dir, semgrep_filename)
-        
-        # Resolve Semgrep path relative to current working directory or workspace path
         semgrep_workspace_path = os.path.join(self.workspace_path, semgrep_filename)
+
+        # Normalize artifact locations across directories
         if not os.path.exists(semgrep_workspace_path) and os.path.exists(semgrep_filename):
             semgrep_workspace_path = semgrep_filename
 
-        # Proactively move Stage 1 output to the run-specific directory if found in workspace
         if os.path.exists(semgrep_workspace_path):
-            # Check if source and dest are different before moving
             if not os.path.exists(target_path) or not os.path.samefile(semgrep_workspace_path, target_path):
                 print(f"[*] Moving {semgrep_workspace_path} to artifact directory: {self.artifact_dir}")
+                os.makedirs(self.artifact_dir, exist_ok=True)
                 shutil.move(semgrep_workspace_path, target_path)
-            
-        semgrep_path = target_path
-        if not os.path.exists(semgrep_path):
-            print(f"[-] Target file {semgrep_path} missing. Terminating pipeline.")
-            sys.exit(0)
 
-        with open(semgrep_path, "r") as f:
+        if not os.path.exists(target_path):
+            raise FileNotFoundError(f"Target static file asset missing at path location: {target_path}")
+
+        with open(target_path, "r") as f:
             semgrep_data = json.load(f)
 
         findings = semgrep_data.get("results", [])
         finding_reports = []
         overall_escalate = False
 
-        if not findings:
-            print("[*] Stage 1 Clear. Falling back to SLM scan on modified functions...")
-            fallback_snippets = self._get_fallback_snippets()
+        # Loop through static matches to locate and extract targets independently
+        for finding in findings:
+            file_target_path = finding.get("path", "")
             
-            if not fallback_snippets:
-                pass 
-            else:
-                for snippet in fallback_snippets:
-                    slm_score = self.slm_inference(snippet)
-                    gate_result = self.evaluate_gate("NONE", slm_score)
-                    finding_reports.append({
-                        "evaluated_file": "Modified Diff Snippet",
-                        "code_snippet": snippet,
-                        "metrics": {
-                            "semgrep_severity_score": 0.0,
-                            "slm_threat_probability": slm_score,
-                            "calculated_combined_risk": gate_result["risk_score"]
-                        },
-                        "escalate": gate_result["escalate"]
-                    })
-                    if gate_result["escalate"]:
-                        overall_escalate = True
-        else:
-            for finding in findings:
-                snippet = finding.get("extra", {}).get("lines", "")
-                severity = finding.get("extra", {}).get("severity", "WARNING")
-                
-                slm_score = self.slm_inference(snippet)
-                gate_result = self.evaluate_gate(severity, slm_score)
-                
-                finding_reports.append({
-                    "evaluated_file": finding.get("path"),
-                    "code_snippet": snippet,
-                    "metrics": {
-                        "semgrep_severity_score": gate_result["metrics"]["static_severity_weight"],
-                        "slm_threat_probability": gate_result["metrics"]["slm_probability_score"],
-                        "calculated_combined_risk": gate_result["risk_score"]
-                    },
-                    "escalate": gate_result["escalate"]
-                })
-                if gate_result["escalate"]:
-                    overall_escalate = True
+            # Extract line boundary metrics logged by the scanner pass
+            start_line = finding.get("start", {}).get("line", 1)
+            end_line = finding.get("end", {}).get("line", 1)
+            severity = finding.get("extra", {}).get("severity", "WARNING")
 
-        # Aggregate and wrap into unified report structure
+            # Extract pure repository source strings instead of using semgrep snippet elements
+            snippet = self.extract_source_snippet(file_target_path, start_line, end_line)
+
+            # Pass the extracted source snippet to the neural model block independently
+            slm_score = self.slm_inference(snippet)
+            
+            # Combine individual scores via triage gate mechanics
+            gate_result = self.evaluate_gate(severity, slm_score)
+
+            if gate_result["escalate"]:
+                overall_escalate = True
+
+            finding_reports.append({
+                "evaluated_file": file_target_path,
+                "code_snippet": snippet,
+                "metrics": {
+                    "semgrep_severity_score": gate_result["metrics"]["static_severity_weight"],
+                    "slm_threat_probability": gate_result["metrics"]["slm_probability_score"],
+                    "calculated_combined_risk": gate_result["risk_score"]
+                },
+                "escalate": gate_result["escalate"]
+            })
+
+        # Pack and serialize the unified pipeline triage data payload safely to disk
         triage_report = {
-            "run_id": self.run_id,
-            "findings": finding_reports,
+            "run_id": "run_local-dev-run",
             "gate_decision": {
                 "escalate_to_llm": overall_escalate,
                 "gating_threshold_applied": self.config["gate_parameters"]["escalation_threshold"]
             },
-            "status": "VULNERABLE" if any(f["metrics"]["calculated_combined_risk"] > 0 for f in finding_reports) else "CLEAR"
+            "findings": finding_reports,
+            "status": "VULNERABLE" if overall_escalate else "SAFE"
         }
-        if not finding_reports:
-            triage_report["status"] = "CLEAR"
 
-        # Write output file to workspace storage disk
-        triage_path = os.path.join(self.artifact_dir, self.config["paths"]["triage_report"])
-        with open(triage_path, "w") as out:
+        triage_output_path = os.path.join(self.artifact_dir, self.config["paths"]["triage_report"])
+        with open(triage_output_path, "w") as out:
             json.dump(triage_report, out, indent=2)
-
-        status = triage_report.get("status")
-        max_risk = max([f["metrics"]["calculated_combined_risk"] for f in finding_reports]) if finding_reports else 0.0
-        print(f"[+] Triage complete ({status}). Processed {len(finding_reports)} findings. Max Risk: {max_risk}. Report: {triage_path}")
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="CEVuD Triage Orchestrator")
-    parser.add_argument("--config", default="config.json", help="Path to config.json")
-    parser.add_argument("--workspace", default=".", help="Path to the workspace codebase under analysis")
-    parser.add_argument("--exclude-dirs", default="workspace_storage,tests", help="Comma-separated path prefixes to exclude from AST fallback scanning")
-    
-    args = parser.parse_args()
-    
-    # Parse exclude directory prefixes list
-    exclude_list = [p.strip() for p in args.exclude_dirs.split(",") if p.strip()]
-    
-    orchestrator = TriageOrchestrator(
-        config_path=args.config,
-        workspace_path=args.workspace,
-        exclude_prefixes=exclude_list
-    )
-    orchestrator.process_pipeline()
+            
+        print(f"[+] Successfully wrote decoupled Stage 2 triage report data to: {triage_output_path}")

@@ -12,8 +12,8 @@ CEVuD is a multi-stage security orchestration pipeline designed to identify vuln
 2.  **Stage 2: Semantic Gating (Local SLM)**
     *   Modified functions are extracted via AST (including a fail-safe scan if Semgrep is silent).
     *   A local CodeBERT model evaluates the threat probability ($P_{slm}$).
-    *   **Risk Formula:** $R = (0.3 \cdot S_{sev}) + (0.7 \cdot P_{slm})$.
-    *   If $R \ge 0.55$, the workflow escalates to Stage 3.
+    *   **Risk Formula:** $R = (0.4 \cdot S_{sev}) + (0.6 \cdot P_{slm})$.
+    *   If $R \ge 0.52$, the workflow escalates to Stage 3.
 
 3.  **Stage 3: Deep Synthesis (DeepAgent)**
     *   A frontier LLM performs task decomposition to trace data lineage.
@@ -42,14 +42,14 @@ CEVuD is a multi-stage security orchestration pipeline designed to identify vuln
 - `src/vector_store.py`: Persistent database client supporting dynamic workspace lookup and embeddings.
 - `src/agent.py`: Advanced agent runtime executing relative to targeted workspaces.
 - `src/evaluate_pipeline.py`: Benchmark runner.
-- `tests/test_pipeline.py`: Suite containing unit tests for AST parser, database store, and gating calculations.
+- `tests/`: Suite containing unit tests for AST parser, database store, and gating calculations.
 
 ## ⚙️ Quick Start
 
 ### 1. Run Unit Tests
 To verify all pipeline logic works correctly:
 ```bash
-python -m pytest tests/test_pipeline.py
+python -m pytest tests/
 ```
 
 ### 2. Scanning a Target Repository
