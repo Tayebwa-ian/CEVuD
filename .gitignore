@@ -3,8 +3,6 @@
 __pycache__/
 *.pyc
 *.pyo
-semgrep_results.json
-stage1_2_triage.json
 vulnerability_samples/
 skills/
 .agents
