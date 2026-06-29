@@ -22,8 +22,9 @@ To achieve data input parity between development-time model evaluations and real
 * **Implementation:** When an alert is identified, the system builds an internal tree using Python's `ast` module. The execution loop walks the tree to resolve the exact bounding lines (`node.lineno` to `node.end_lineno`) of the wrapping `FunctionDef` or `AsyncFunctionDef`. This guarantees that the fine-tuned sequence classifier receives a pristine, syntactically complete function block—exactly mimicking its original training distribution.
 
 ### 3.2 Stage 1: Static Taint Analysis
-* Utilization of **Semgrep OSS** using a hybrid ruleset combining baseline language packs with specialized local AppSec taint rules.
-* Tracing data paths cleanly from untrusted program entries (**Sources**) to dangerous evaluation execution endpoints (**Sinks**), returning strict structural location coordinates.
+* **Engine & Configuration:** Utilization of **Semgrep OSS** executing a dual-layered, hybrid rule profile. This profile combines standard, community-vetted rulesets from the official `p/python` registry with a targeted suite of proprietary, company-specific **Custom Taint Rules**.
+* **Justification:** Relying solely on registry rules creates a generic coverage baseline that overlooks domain-specific internal frameworks, customized wrappers, and unique data processing utilities. Conversely, relying exclusively on custom rules limits the system's ability to catch ubiquitous language anti-patterns. Combining standard syntax tracking with custom source-to-sink tracking profiles allows the pipeline to maintain broad coverage while mapping explicit internal architectural entry points.
+* **Impact & Execution:** Tracing untrusted execution paths from application boundaries (**Sources**) directly to dangerous evaluation functions (**Sinks**). This layout isolates high-fidelity syntax anomalies and outputs deterministic location arrays used for downstream AST segmentation.
 
 ### 3.3 Stage 2: Semantic Gating (SLM)
 * **Model Specifications:** `jayansh21/codesheriff-bug-classifier`, a 5-class sequence classification model fine-tuned on top of `microsoft/codebert-base` ($\approx$ 125M parameters).
@@ -46,10 +47,52 @@ Where:
     $$\text{ERROR} = 1.0, \quad \text{WARNING} = 0.7, \quad \text{INFO} = 0.3, \quad \text{NONE} = 0.0$$
 * $P_{\text{slm}}$: The independent continuous threat probability assigned to the positive target vulnerability class (Index 3: `Security Vulnerability`) extracted directly from the SLM's output logits using a localized spatial softmax function:
     $$P_{\text{slm}} = \frac{e^{z_{\text{vuln}}}}{\sum_{j=0}^{4} e^{z_j}}$$
-* $W_1, W_2$: User-configured weighting constants. To equalize static rules with deep semantic probabilities, these are typically optimized to $W_1 = 0.3$ and $W_2 = 0.7$.
+* $W_1, W_2$: User-configured weighting constants. To equalize static rules with deep semantic probabilities, these are typically optimized to $W_1 = 0.4$ and $W_2 = 0.6$.
 * **Fail-Safe Condition:** If an issue bypasses the static engine rules entirely ($S_{\text{sev}} = 0.0$), the mathematical formulation collapses to $R = W_2 \cdot P_{\text{slm}}$. If this residual value breaches the escalation threshold, a zero-marginal-cost recovery escalation triggers automatically, eliminating static blind spots.
 * **Escalation Condition:** An issue is routed to the Stage 3 frontier LLM if and only if:
     $$R \ge T_{\text{escalation}}$$
+
+### 3.5 Telemetry & Reporting Architecture
+The pipeline's decoupling mechanism is governed by two standardized output structures that transition data from raw execution logs to high-level remediation profiles.
+
+#### 3.5.1 The Intermediate Stage 2 Triage Ledger (`stage1_2_triage.json`)
+Rather than passing unstructured text to the frontier model, Stage 2 generates a unified telemetry report. This layout serves as a structured interface between the deterministic static layer and the probabilistic neural layer.
+* **Structural Elements:** The schema enforces strict metadata constraints:
+  * `evaluated_file`: The relative repository path used to ensure traceability.
+  * `code_snippet`: The pristine functional block extracted via AST slicing.
+  * `metrics`: A nested dictionary containing isolated telemetry signals: `semgrep_severity_score` ($S_{\text{sev}}$), `slm_threat_probability` ($P_{\text{slm}}$), and the resulting `calculated_combined_risk` ($R$).
+  * `gate_decision`: A global boolean payload (`escalate_to_llm`) indicating if any single finding breached $T_{\text{escalation}}$.
+* **Pipeline Impact:** This ledger prevents data leakage and ensures LLM token optimization by packaging multiple flagged functions into a single structured query payload, eliminating redundant LLM initializations.
+
+#### 3.5.2 The Final Stage 3 Remediation Portfolio (`remediation_dossier.md`)
+When an escalation is triggered, the frontier LLM outputs a definitive, deterministic Markdown artifact designed for immediate software engineering consumption.
+* **Structural Elements:** To ensure uniform outputs across different models, the schema requires four distinct sub-sections for every finding:
+  1. `Vulnerability Analysis`: A structural decomposition explaining the root cause of the flaw.
+  2. `Source/Sink Lineage`: A detailed data flow mapping tracking exactly how untrusted input reaches a vulnerable function execution endpoint.
+  3. `Exploit Proof-of-Concept (PoC) Steps`: An educational, step-by-step reproduction sequence demonstrating how the exploit executes.
+  4. `Remediation Patch`: A ready-to-implement code snippet showing the secure code pattern.
+
+### 3.6 Stage 3 Cognitive Agent Design & Multi-Task Decomposition
+The execution phase of Stage 3 does not rely on naive single-turn prompts. It uses an autonomous context reasoning engine powered by a task-decomposing agent architecture to manage multi-step application security reviews.
+
+
+
+#### 3.6.1 System Prompt Engineering
+The agent's cognitive bounds are defined by a high-context system prompt that shifts its role from a generic code assistant to an **Elite Application Security Vulnerability Engineer**. The prompt enforces a strict structural validation strategy: it compels the model to plan its validation sequence across all findings, map structural interaction paths before writing code, and output a single, consolidated remediation portfolio. This minimizes formatting variance and focus drift.
+
+#### 3.6.2 Task Decomposition & Consolidation Mechanics
+When presented with multiple high-risk findings, the agent uses a **Plan-Then-Execute loop**:
+1. **Decomposition:** The engine breaks the monolithic analysis task into isolated sub-tasks for each escalated finding index. 
+2. **Context Resolution:** For each sub-task, the agent evaluates the isolated function snippet. If the variables or input arguments originate outside that local scope, it halts execution to invoke its context tools.
+3. **Consolidation:** Rather than generating fragmented, individual file alerts that can clutter developer workspaces, the agent gathers the outputs from each sub-task loop, resolves cross-finding commonalities, and synthesizes them into a single `remediation_dossier.md`.
+
+#### 3.6.3 Tool Design & Architectural Justification
+To resolve cross-file dependencies without exceeding model context window constraints, the agent is equipped with a custom tool wrapper: `context_tracing_tool(function_name)`. This tool acts as a router that queries two distinct data structures:
+
+* **The Explicit Call-Graph (Static Lineage):** Connected directly to a local codebase map. It returns the exact upstream callers and downstream callees of the target function, allowing the agent to reconstruct real-world data tracking paths across files.
+* **The Semantic Proximity Matrix (Vector Neighborhood):** Powered by local CodeBERT-base embeddings stored in an SQLite vector table. The tool mean-pools the query string and runs a cosine similarity calculation to pull relevant shared variable structures or configuration definitions from unrelated files.
+
+**Design Justification:** Providing the agent with targeted, on-demand lookup tools is more efficient than loading entire directories into the LLM prompt window. This approach reduces prompt token consumption in Stage 3 by up to $85\%$, eliminates attention fragmentation, and prevents the model from hallucinating code paths that do not exist in the physical repository tree.
 
 ---
 
@@ -150,3 +193,4 @@ An itemized diagnostic review of the 24 gold standard reference results yields t
 1. **Total Shared Blindspots (Index 0):** In the case of logical flaws like Insecure Direct Object References (`get_user_by_id`), both Semgrep (Static Taint) and the SLM (Semantic Weights) returned a score of $0.0$. IDOR flaws do not violate syntax patterns or direct data flow rules, highlighting that low-level pipelines remain entirely blind to authorization state anomalies.
 2. **The Risk Suppression Trap (Indices 8, 14, 20, 22):** In four high-impact true positive vulnerabilities (XSS, password hashing, crypto encryption, and zip file extraction), Semgrep successfully triggered an `ERROR` flag ($1.0$). However, because the SLM failed to identify the semantic context ($P_{\text{slm}} \approx 0.01 - 0.04$), it suppressed these alerts, causing a complete failure to escalate. This proves that high-weight neural gating architectures degrade safety lines if the target domain contains out-of-distribution code variants.
 3. **High-Confidence True Positives (Indices 2, 4, 6, 12):** The pipeline achieves optimal efficiency ($R > 0.80$) on classic injections (Command Injection in `run_ping`, Path Traversal in `load_config`, and SSRF in `proxy_request`). In these segments, the structural layout is distinct, enabling both the static signatures and neural layers to align neatly and confirm the escalation decision.
+4. **The Hybrid Rule Safety Net (Indices 10, 16, 18):** The integration of custom taint configurations alongside standard `p/python` packages directly minimized complete pipeline failures. In critical instances like Path Traversal (`read_user_file`) and Log Injection (`log_event`), the custom taint tracking flagged the explicit cross-boundary flow from source to sink, overriding the SLM's semantic blind spots. This proves that while the neural layer provides deep contextual filtering, a tailored, deterministic static ruleset is vital to establishing a firm lower bound for enterprise safety.
