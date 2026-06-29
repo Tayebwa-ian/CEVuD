@@ -8,5 +8,7 @@ skills/
 .agents
 ms.md
 .pytest*
+.continue/
 test_config_manifest.json
 unit_test_config_manifest.json
+model_cache/

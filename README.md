@@ -10,10 +10,10 @@ CEVuD is a multi-stage security orchestration pipeline designed to identify vuln
     *   Assigns a severity weight ($S_{sev}$).
 
 2.  **Stage 2: Semantic Gating (Local SLM)**
-    *   Modified functions are extracted via AST (including a fail-safe scan if Semgrep is silent).
-    *   A local CodeBERT model evaluates the threat probability ($P_{slm}$).
-    *   **Risk Formula:** $R = (0.4 \cdot S_{sev}) + (0.6 \cdot P_{slm})$.
-    *   If $R \ge 0.52$, the workflow escalates to Stage 3.
+    * Modified functions are extracted via AST.
+    * A local CodeBERT model evaluates the threat probability ($P_{slm}$).
+    * **Risk Formula:** $R = (0.4 \cdot S_{sev}) + (0.6 \cdot P_{slm})$.
+    * **Escalation:** Triggered if $R \ge 0.52$ OR if either the static severity is critical ($1.0$) or the SLM probability is very high ($> 0.9$).
 
 3.  **Stage 3: Deep Synthesis (DeepAgent)**
     *   A frontier LLM performs task decomposition to trace data lineage.

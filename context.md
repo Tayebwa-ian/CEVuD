@@ -92,7 +92,10 @@ Where:
 - $P_{\text{slm}}$ is the local ONNX model's classification probability output.
 - $W_1 = 0.4$ and $W_2 = 0.6$ represent the default operational weights (optimized for SLM-heavy gating).
 - If $R \ge 0.52$, trigger Stage 3. Otherwise, log the result and terminate cleanly to save tokens.
-**Escalation Logic:** If *any* individual finding's risk score ($R$) meets or exceeds the threshold, *all* high-risk findings are passed to Stage 3.
+**Escalation Logic:** An escalation to Stage 3 is triggered if:
+- $S_{\text{sev}} \ge 1.0$ (Direct override for critical static findings) **OR**
+- $P_{\text{slm}} > 0.9$ (Direct override for high-confidence semantic findings) **OR**
+- $R \ge 0.52$ (Composite risk threshold met)
 **Fail-Safe Logic:** If Semgrep returns zero findings, $W_1$ is set to $0.0$ and the pipeline evaluates the modified code diff directly via the SLM.
 
 

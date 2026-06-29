@@ -18,6 +18,18 @@ jobs:
         run: |
           mkdir -p workspace_storage/codebase_vectors 
           mkdir -p workspace_storage/artifacts/run_${{ github.sha }}
+          # 🏎️ Ensure the host cache directory exists before mounting
+          mkdir -p workspace_storage/model_cache
+
+      # --- 💾 CACHE LAYER STEP ---
+      - name: Cache Small Language Model Weights
+        uses: actions/cache@v4
+        with:
+          path: workspace_storage/model_cache
+          # Change this string key if you update your base model reference
+          key: ${{ runner.os }}-slm-weights-v1
+          restore-keys: |
+            ${{ runner.os }}-slm-weights-
 
       - name: Setup Docker Buildx Engine
         uses: docker/setup-buildx-action@v3
@@ -29,7 +41,6 @@ jobs:
           file: ./Dockerfile
           tags: appsec-pipeline:latest
           outputs: type=docker,dest=/tmp/appsec-pipeline.tar
-          # Enable full multi-layer caching inside GitHub Actions backend
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -45,13 +56,15 @@ jobs:
         env:
           GITHUB_RUN_ID: "run_${{ github.sha }}"
         run: |
+          # 🏎️ Added volume mount mapping host 'workspace_storage/model_cache' to container location
           docker run --rm \
             -e GITHUB_RUN_ID="run_${{ github.sha }}" \
             -v ${{ github.workspace }}:/app/workspace \
+            -v ${{ github.workspace }}/workspace_storage/model_cache:/root/.cache/huggingface \
             appsec-pipeline:latest src/triage_orchestrator.py --workspace /app/workspace --exclude-dirs "workspace_storage,tests,src"
 
       - name: Execute Stage 3 (DeepAgent Context Analysis & Synthesis)
-        if: always() # Allows internal scripts to decide termination rather than CI breaking early
+        if: always()
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

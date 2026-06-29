@@ -43,9 +43,10 @@ def real_test_config(repository_root) -> str:
             "triage_report": "stage1_2_triage.json"
         },
         "gate_parameters": {
-            "weight_static": 0.3,
-            "weight_slm": 0.7,
-            "escalation_threshold": 0.55
+            "weight_static": 0.4,
+            "weight_slm": 0.6,
+            "escalation_threshold": 0.50,
+            "slm_override_threshold": 0.90
         },
         "semgrep_severity_map": {
             "INFO": 0.3,
@@ -80,7 +81,8 @@ def unit_test_config(repository_root) -> str:
         "gate_parameters": {
             "weight_static": 0.4,
             "weight_slm": 0.6,
-            "escalation_threshold": 0.5
+            "escalation_threshold": 0.5,
+            "slm_override_threshold": 0.90
         },
         "semgrep_severity_map": {
             "ERROR": 1.0, "WARNING": 0.5, "INFO": 0.2, "NONE": 0.0

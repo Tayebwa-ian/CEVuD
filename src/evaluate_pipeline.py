@@ -49,7 +49,7 @@ class PipelineEvaluator:
         1. Materialise gold-standard code snippets to temporary files on disk.
         2. Execute a live Semgrep scan (Stage 1) against those files.
         3. For every test case, run the CodeBERT SLM inference (Stage 2).
-        4. Apply the mathematical gating formula to compute a risk score.
+        4. Apply the updated mathematical gating formula with safety overrides to compute a risk score.
         5. Compare the pipeline's escalation decision against the ground-truth
            label to populate a confusion matrix.
         6. Derive Recall, Precision, Accuracy, F1, Token Reduction Rate (TRR),
@@ -60,7 +60,7 @@ class PipelineEvaluator:
 
     def __init__(self, config_path: str):
         """
-        Initialise the evaluator with pipeline weights and a unique run directory.
+        Initialise the evaluator with pipeline weights, threshold bounds, and a unique run directory.
 
         Args:
             config_path: Absolute or relative path to the master ``config.json``.
@@ -72,6 +72,8 @@ class PipelineEvaluator:
         self.w1 = self.config["gate_parameters"]["weight_static"]
         self.w2 = self.config["gate_parameters"]["weight_slm"]
         self.threshold = self.config["gate_parameters"]["escalation_threshold"]
+        # 🎯 ASYMMETRIC GATE UPGRADE: Extract the neural short-circuit override boundary config
+        self.slm_override_threshold = self.config["gate_parameters"].get("slm_override_threshold", 0.90)
 
         # Instantiate the real orchestrator so we can call slm_inference()
         self.orchestrator = TriageOrchestrator(config_path)
@@ -191,6 +193,7 @@ class PipelineEvaluator:
 
         This method:
             * Materialises snippets → runs Semgrep → runs CodeBERT inference.
+            * Applies the newly integrated asymmetric short-circuiting override logic.
             * Computes a full confusion matrix and derived metrics.
             * Writes ``summary.json``, ``detailed_findings.json``, and charts
               into the versioned evaluation directory.
@@ -258,10 +261,20 @@ class PipelineEvaluator:
                 # 2. Run real CodeBERT inference on the expanded, unified source window
                 p_slm = self.orchestrator.slm_inference(unified_source_window)
 
-                # 3. Apply the gating formula: R = (W1 × S_sev) + (W2 × P_slm)
+                # 3. Apply the base gating formula: R = (W1 × S_sev) + (W2 × P_slm)
                 risk_score = (self.w1 * s_sev) + (self.w2 * p_slm)
-                all_risk_scores.append(risk_score)
-                escalated = risk_score >= self.threshold
+                
+                # 🚨 ASYMMETRIC SHORT-CIRCUIT CHECKS
+                # Ensure the evaluator calculates escalation states using the identical overrides 
+                # running inside production orchestration pipelines.
+                static_override = (s_sev >= 1.0)
+                slm_override = (p_slm > self.slm_override_threshold)
+                
+                escalated = (risk_score >= self.threshold) or static_override or slm_override
+
+                # If a safety override short-circuit triggers, upscale the reported risk mapping index
+                reported_risk = max(risk_score, 1.0) if (static_override or slm_override) else risk_score
+                all_risk_scores.append(reported_risk)
 
                 if escalated:
                     escalations += 1
@@ -286,13 +299,14 @@ class PipelineEvaluator:
                     "semgrep_severity": sev_str,
                     "static_weight": round(s_sev, 4),
                     "slm_probability": round(p_slm, 4),
-                    "risk_score": round(risk_score, 4),
+                    "risk_score": round(reported_risk, 4),
                     "escalated": escalated,
+                    "override_triggered": (static_override or slm_override)
                 })
 
                 print(
                     f"  [{i:02d}] {case['function_name']:25s} | "
-                    f"Risk: {risk_score:.3f} | "
+                    f"Risk: {reported_risk:.3f} | "
                     f"Escalated: {str(escalated):5s} | "
                     f"Ground Truth: {'VULN' if is_vuln else 'SAFE'}"
                 )
@@ -303,19 +317,18 @@ class PipelineEvaluator:
             total = len(test_cases)
 
             # Detection effectiveness
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            accuracy = (tp + tn) / total if total > 0 else 0.0
+            relative_recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            relative_precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            relative_accuracy = (tp + tn) / total if total > 0 else 0.0
             f1_score = (
-                2 * (precision * recall) / (precision + recall)
-                if (precision + recall) > 0
+                2 * (relative_precision * relative_recall) / (relative_precision + relative_recall)
+                if (relative_precision + relative_recall) > 0
                 else 0.0
             )
-            specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+            relative_specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
 
             # Cost-efficiency
             token_reduction_rate = (1 - (escalations / total)) * 100 if total > 0 else 0.0
-            # CSR estimates savings vs. sending every case to the frontier LLM
             cost_savings_ratio = (
                 (total - escalations) / total * 100 if total > 0 else 0.0
             )
@@ -333,11 +346,11 @@ class PipelineEvaluator:
                     "fn": fn, "tn": tn,
                 },
                 "metrics": {
-                    "recall": round(recall, 4),
-                    "precision": round(precision, 4),
-                    "accuracy": round(accuracy, 4),
+                    "recall": round(relative_recall, 4),
+                    "precision": round(relative_precision, 4),
+                    "accuracy": round(relative_accuracy, 4),
                     "f1_score": round(f1_score, 4),
-                    "specificity": round(specificity, 4),
+                    "specificity": round(relative_specificity, 4),
                     "token_reduction_rate": round(token_reduction_rate, 2),
                     "cost_savings_ratio": round(cost_savings_ratio, 2),
                 },
@@ -367,19 +380,18 @@ class PipelineEvaluator:
             print(f"  Total Cases Tested      : {total}")
             print(f"  Total Escalations       : {escalations}")
             print(f"  ─── Detection Metrics ───")
-            print(f"  Recall (Sensitivity)    : {recall * 100:.1f}%")
-            print(f"  Precision               : {precision * 100:.1f}%")
-            print(f"  Accuracy                : {accuracy * 100:.1f}%")
+            print(f"  Recall (Sensitivity)    : {relative_recall * 100:.1f}%")
+            print(f"  Precision               : {relative_precision * 100:.1f}%")
+            print(f"  Accuracy                : {relative_accuracy * 100:.1f}%")
             print(f"  F1 Score                : {f1_score:.4f}")
-            print(f"  Specificity             : {specificity * 100:.1f}%")
+            print(f"  Specificity             : {relative_specificity * 100:.1f}%")
             print(f"  ─── Cost Metrics ────────")
             print(f"  Token Reduction Rate    : {token_reduction_rate:.1f}%")
             print(f"  Cost Savings Ratio      : {cost_savings_ratio:.1f}%")
             print("=" * 58)
             print(f"  [+] Artifacts saved to: {self.eval_dir}")
 
-            # Validation guards for research targets
-            if recall >= 0.95 and token_reduction_rate >= 50.0:
+            if relative_recall >= 0.95 and token_reduction_rate >= 50.0:
                 print(
                     "  [+] Target Met: Pipeline is cost-efficient "
                     "and structurally secure."
@@ -408,16 +420,6 @@ class PipelineEvaluator:
     ):
         """
         Produce persistent visual artifacts for the evaluation run.
-
-        Generated files:
-            * ``risk_distribution.png``   – histogram of all risk scores
-            * ``confusion_matrix.png``    – annotated heatmap
-            * ``category_performance.png``– per-file-path detection accuracy
-
-        Args:
-            tp, fp, fn, tn: Confusion matrix counts.
-            scores:         All computed risk scores from the evaluation loop.
-            detailed_findings: Per-case records including file_path for grouping.
         """
         # ---- 1. Risk Score Distribution Histogram ----
         plt.figure(figsize=(10, 5))
@@ -441,7 +443,6 @@ class PipelineEvaluator:
         cax = ax.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
         fig.colorbar(cax)
 
-        # Annotate each cell with the count
         for row in range(2):
             for col in range(2):
                 ax.text(col, row, str(cm[row][col]),
@@ -459,11 +460,8 @@ class PipelineEvaluator:
         plt.close()
 
         # ---- 3. Per-Category Detection Bar Chart ----
-        # Group findings by the source file path (e.g. app/database.py)
-        # and compute per-category accuracy (correct decisions / total).
         category_stats: Dict[str, Dict[str, int]] = {}
         for finding in detailed_findings:
-            # Use the file_path basename without extension as the category
             cat = os.path.splitext(os.path.basename(finding["file_path"]))[0]
             if cat not in category_stats:
                 category_stats[cat] = {"correct": 0, "total": 0}
@@ -485,7 +483,6 @@ class PipelineEvaluator:
 
         plt.figure(figsize=(10, 5))
         bars = plt.bar(categories, accuracies, color="mediumseagreen", edgecolor="black")
-        # Annotate each bar with its value
         for bar, acc in zip(bars, accuracies):
             plt.text(
                 bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
@@ -528,13 +525,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Resolve the ledger path
     ledger = args.ledger or _DEFAULT_GOLD_STANDARD
     if not os.path.exists(ledger):
         print(f"[-] Ledger file not found: {ledger}")
         raise SystemExit(1)
 
-    # Optionally seed the vector store first
     if args.seed:
         print("[*] Seeding benchmark data before evaluation...")
         os.system(
@@ -543,3 +538,4 @@ if __name__ == "__main__":
 
     evaluator = PipelineEvaluator(args.config)
     evaluator.run_evaluation(ledger)
+    

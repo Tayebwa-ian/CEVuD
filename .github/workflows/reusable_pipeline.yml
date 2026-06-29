@@ -42,6 +42,17 @@ jobs:
         run: |
           mkdir -p workspace_storage/codebase_vectors 
           mkdir -p workspace_storage/artifacts/run_${{ github.sha }}
+          # 🏎️ Ensure the host cache directory exists before mounting
+          mkdir -p workspace_storage/model_cache
+
+      # --- 💾 CACHE LAYER STEP ---
+      - name: Cache Small Language Model Weights
+        uses: actions/cache@v4
+        with:
+          path: workspace_storage/model_cache
+          key: ${{ runner.os }}-slm-weights-v1
+          restore-keys: |
+            ${{ runner.os }}-slm-weights-
 
       - name: Setup Docker Buildx Engine
         uses: docker/setup-buildx-action@v3
@@ -70,9 +81,11 @@ jobs:
         env:
           GITHUB_RUN_ID: "run_${{ github.sha }}"
         run: |
+          # 🏎️ Added volume mount mapping host 'workspace_storage/model_cache' to container location
           docker run --rm \
             -e GITHUB_RUN_ID="run_${{ github.sha }}" \
             -v ${{ github.workspace }}:/workspace \
+            -v ${{ github.workspace }}/workspace_storage/model_cache:/root/.cache/huggingface \
             appsec-pipeline:latest \
             /app/src/triage_orchestrator.py --workspace /workspace --config ${{ inputs.config-path }} --exclude-dirs "${{ inputs.exclude-dirs }},cevud-scanner"
 

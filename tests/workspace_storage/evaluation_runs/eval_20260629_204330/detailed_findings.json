@@ -7,8 +7,9 @@
     "semgrep_severity": "NONE",
     "static_weight": 0.0,
     "slm_probability": 0.0746,
-    "risk_score": 0.0522,
-    "escalated": false
+    "risk_score": 0.0448,
+    "escalated": false,
+    "override_triggered": false
   },
   {
     "index": 1,
@@ -18,8 +19,9 @@
     "semgrep_severity": "NONE",
     "static_weight": 0.0,
     "slm_probability": 0.1141,
-    "risk_score": 0.0799,
-    "escalated": false
+    "risk_score": 0.0685,
+    "escalated": false,
+    "override_triggered": false
   },
   {
     "index": 2,
@@ -29,8 +31,9 @@
     "semgrep_severity": "ERROR",
     "static_weight": 1.0,
     "slm_probability": 0.8641,
-    "risk_score": 0.9049,
-    "escalated": true
+    "risk_score": 1.0,
+    "escalated": true,
+    "override_triggered": true
   },
   {
     "index": 3,
@@ -40,8 +43,9 @@
     "semgrep_severity": "NONE",
     "static_weight": 0.0,
     "slm_probability": 0.7104,
-    "risk_score": 0.4973,
-    "escalated": false
+    "risk_score": 0.4262,
+    "escalated": false,
+    "override_triggered": false
   },
   {
     "index": 4,
@@ -51,8 +55,9 @@
     "semgrep_severity": "ERROR",
     "static_weight": 1.0,
     "slm_probability": 0.8722,
-    "risk_score": 0.9105,
-    "escalated": true
+    "risk_score": 1.0,
+    "escalated": true,
+    "override_triggered": true
   },
   {
     "index": 5,
@@ -62,8 +67,9 @@
     "semgrep_severity": "ERROR",
     "static_weight": 1.0,
     "slm_probability": 0.1246,
-    "risk_score": 0.3872,
-    "escalated": false
+    "risk_score": 1.0,
+    "escalated": true,
+    "override_triggered": true
   },
   {
     "index": 6,
@@ -73,8 +79,9 @@
     "semgrep_severity": "ERROR",
     "static_weight": 1.0,
     "slm_probability": 0.7216,
-    "risk_score": 0.8051,
-    "escalated": true
+    "risk_score": 1.0,
+    "escalated": true,
+    "override_triggered": true
   },
   {
     "index": 7,
@@ -84,8 +91,9 @@
     "semgrep_severity": "NONE",
     "static_weight": 0.0,
     "slm_probability": 0.7057,
-    "risk_score": 0.494,
-    "escalated": false
+    "risk_score": 0.4234,
+    "escalated": false,
+    "override_triggered": false
   },
   {
     "index": 8,
@@ -95,8 +103,9 @@
     "semgrep_severity": "ERROR",
     "static_weight": 1.0,
     "slm_probability": 0.0465,
-    "risk_score": 0.3326,
-    "escalated": false
+    "risk_score": 1.0,
+    "escalated": true,
+    "override_triggered": true
   },
   {
     "index": 9,
@@ -106,8 +115,9 @@
     "semgrep_severity": "NONE",
     "static_weight": 0.0,
     "slm_probability": 0.0461,
-    "risk_score": 0.0323,
-    "escalated": false
+    "risk_score": 0.0277,
+    "escalated": false,
+    "override_triggered": false
   },
   {
     "index": 10,
@@ -117,8 +127,9 @@
     "semgrep_severity": "WARNING",
     "static_weight": 0.7,
     "slm_probability": 0.6407,
-    "risk_score": 0.6585,
-    "escalated": true
+    "risk_score": 0.6644,
+    "escalated": true,
+    "override_triggered": false
   },
   {
     "index": 11,
@@ -128,8 +139,9 @@
     "semgrep_severity": "WARNING",
     "static_weight": 0.7,
     "slm_probability": 0.0882,
-    "risk_score": 0.2717,
-    "escalated": false
+    "risk_score": 0.3329,
+    "escalated": false,
+    "override_triggered": false
   },
   {
     "index": 12,
@@ -139,8 +151,9 @@
     "semgrep_severity": "ERROR",
     "static_weight": 1.0,
     "slm_probability": 0.9038,
-    "risk_score": 0.9327,
-    "escalated": true
+    "risk_score": 1.0,
+    "escalated": true,
+    "override_triggered": true
   },
   {
     "index": 13,
@@ -150,8 +163,9 @@
     "semgrep_severity": "ERROR",
     "static_weight": 1.0,
     "slm_probability": 0.5081,
-    "risk_score": 0.6557,
-    "escalated": true
+    "risk_score": 1.0,
+    "escalated": true,
+    "override_triggered": true
   },
   {
     "index": 14,
@@ -161,8 +175,9 @@
     "semgrep_severity": "ERROR",
     "static_weight": 1.0,
     "slm_probability": 0.0297,
-    "risk_score": 0.3208,
-    "escalated": false
+    "risk_score": 1.0,
+    "escalated": true,
+    "override_triggered": true
   },
   {
     "index": 15,
@@ -172,8 +187,9 @@
     "semgrep_severity": "NONE",
     "static_weight": 0.0,
     "slm_probability": 0.0098,
-    "risk_score": 0.0069,
-    "escalated": false
+    "risk_score": 0.0059,
+    "escalated": false,
+    "override_triggered": false
   },
   {
     "index": 16,
@@ -183,8 +199,9 @@
     "semgrep_severity": "WARNING",
     "static_weight": 0.7,
     "slm_probability": 0.7338,
-    "risk_score": 0.7237,
-    "escalated": true
+    "risk_score": 0.7203,
+    "escalated": true,
+    "override_triggered": false
   },
   {
     "index": 17,
@@ -194,8 +211,9 @@
     "semgrep_severity": "WARNING",
     "static_weight": 0.7,
     "slm_probability": 0.0961,
-    "risk_score": 0.2773,
-    "escalated": false
+    "risk_score": 0.3377,
+    "escalated": false,
+    "override_triggered": false
   },
   {
     "index": 18,
@@ -205,8 +223,9 @@
     "semgrep_severity": "INFO",
     "static_weight": 0.3,
     "slm_probability": 0.7222,
-    "risk_score": 0.5955,
-    "escalated": true
+    "risk_score": 0.5533,
+    "escalated": true,
+    "override_triggered": false
   },
   {
     "index": 19,
@@ -216,8 +235,9 @@
     "semgrep_severity": "INFO",
     "static_weight": 0.3,
     "slm_probability": 0.0908,
-    "risk_score": 0.1536,
-    "escalated": false
+    "risk_score": 0.1745,
+    "escalated": false,
+    "override_triggered": false
   },
   {
     "index": 20,
@@ -227,8 +247,9 @@
     "semgrep_severity": "ERROR",
     "static_weight": 1.0,
     "slm_probability": 0.0173,
-    "risk_score": 0.3121,
-    "escalated": false
+    "risk_score": 1.0,
+    "escalated": true,
+    "override_triggered": true
   },
   {
     "index": 21,
@@ -238,8 +259,9 @@
     "semgrep_severity": "ERROR",
     "static_weight": 1.0,
     "slm_probability": 0.0142,
-    "risk_score": 0.3099,
-    "escalated": false
+    "risk_score": 1.0,
+    "escalated": true,
+    "override_triggered": true
   },
   {
     "index": 22,
@@ -249,8 +271,9 @@
     "semgrep_severity": "ERROR",
     "static_weight": 1.0,
     "slm_probability": 0.011,
-    "risk_score": 0.3077,
-    "escalated": false
+    "risk_score": 1.0,
+    "escalated": true,
+    "override_triggered": true
   },
   {
     "index": 23,
@@ -260,7 +283,8 @@
     "semgrep_severity": "NONE",
     "static_weight": 0.0,
     "slm_probability": 0.0111,
-    "risk_score": 0.0078,
-    "escalated": false
+    "risk_score": 0.0067,
+    "escalated": false,
+    "override_triggered": false
   }
 ]

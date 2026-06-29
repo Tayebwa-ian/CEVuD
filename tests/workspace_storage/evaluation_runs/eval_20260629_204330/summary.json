@@ -1,0 +1,21 @@
+{
+  "eval_id": "eval_20260629_204330",
+  "timestamp": "2026-06-29T20:44:24.580674",
+  "total_cases": 24,
+  "escalations": 14,
+  "confusion_matrix": {
+    "tp": 11,
+    "fp": 3,
+    "fn": 1,
+    "tn": 9
+  },
+  "metrics": {
+    "recall": 0.9167,
+    "precision": 0.7857,
+    "accuracy": 0.8333,
+    "f1_score": 0.8462,
+    "specificity": 0.75,
+    "token_reduction_rate": 41.67,
+    "cost_savings_ratio": 41.67
+  }
+}

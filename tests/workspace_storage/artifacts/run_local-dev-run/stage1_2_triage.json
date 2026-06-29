@@ -2,7 +2,7 @@
   "run_id": "run_local-dev-run",
   "gate_decision": {
     "escalate_to_llm": true,
-    "gating_threshold_applied": 0.55
+    "gating_threshold_applied": 0.5
   },
   "findings": [
     {
@@ -11,7 +11,7 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.8722,
-        "calculated_combined_risk": 0.9105
+        "calculated_combined_risk": 1.0
       },
       "escalate": true
     },
@@ -21,7 +21,7 @@
       "metrics": {
         "semgrep_severity_score": 0.7,
         "slm_threat_probability": 0.8722,
-        "calculated_combined_risk": 0.8205
+        "calculated_combined_risk": 0.8033
       },
       "escalate": true
     },
@@ -31,9 +31,9 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.1246,
-        "calculated_combined_risk": 0.3872
+        "calculated_combined_risk": 1.0
       },
-      "escalate": false
+      "escalate": true
     },
     {
       "evaluated_file": "/home/passwd/CEVuD/tests/workspace_storage/app/api.py",
@@ -41,7 +41,7 @@
       "metrics": {
         "semgrep_severity_score": 0.7,
         "slm_threat_probability": 0.1246,
-        "calculated_combined_risk": 0.2972
+        "calculated_combined_risk": 0.3548
       },
       "escalate": false
     },
@@ -51,9 +51,9 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.011,
-        "calculated_combined_risk": 0.3077
+        "calculated_combined_risk": 1.0
       },
-      "escalate": false
+      "escalate": true
     },
     {
       "evaluated_file": "/home/passwd/CEVuD/tests/workspace_storage/app/auth.py",
@@ -61,7 +61,7 @@
       "metrics": {
         "semgrep_severity_score": 0.7,
         "slm_threat_probability": 0.0297,
-        "calculated_combined_risk": 0.2308
+        "calculated_combined_risk": 0.2978
       },
       "escalate": false
     },
@@ -71,9 +71,9 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.0297,
-        "calculated_combined_risk": 0.3208
+        "calculated_combined_risk": 1.0
       },
-      "escalate": false
+      "escalate": true
     },
     {
       "evaluated_file": "/home/passwd/CEVuD/tests/workspace_storage/app/auth.py",
@@ -81,7 +81,7 @@
       "metrics": {
         "semgrep_severity_score": 0.7,
         "slm_threat_probability": 0.0297,
-        "calculated_combined_risk": 0.2308
+        "calculated_combined_risk": 0.2978
       },
       "escalate": false
     },
@@ -91,9 +91,9 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.0173,
-        "calculated_combined_risk": 0.3121
+        "calculated_combined_risk": 1.0
       },
-      "escalate": false
+      "escalate": true
     },
     {
       "evaluated_file": "/home/passwd/CEVuD/tests/workspace_storage/app/crypto.py",
@@ -101,9 +101,9 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.0142,
-        "calculated_combined_risk": 0.3099
+        "calculated_combined_risk": 1.0
       },
-      "escalate": false
+      "escalate": true
     },
     {
       "evaluated_file": "/home/passwd/CEVuD/tests/workspace_storage/app/files.py",
@@ -111,7 +111,7 @@
       "metrics": {
         "semgrep_severity_score": 0.7,
         "slm_threat_probability": 0.6407,
-        "calculated_combined_risk": 0.6585
+        "calculated_combined_risk": 0.6644
       },
       "escalate": true
     },
@@ -121,7 +121,7 @@
       "metrics": {
         "semgrep_severity_score": 0.7,
         "slm_threat_probability": 0.0882,
-        "calculated_combined_risk": 0.2717
+        "calculated_combined_risk": 0.3329
       },
       "escalate": false
     },
@@ -131,7 +131,7 @@
       "metrics": {
         "semgrep_severity_score": 0.3,
         "slm_threat_probability": 0.7222,
-        "calculated_combined_risk": 0.5955
+        "calculated_combined_risk": 0.5533
       },
       "escalate": true
     },
@@ -141,7 +141,7 @@
       "metrics": {
         "semgrep_severity_score": 0.3,
         "slm_threat_probability": 0.0908,
-        "calculated_combined_risk": 0.1536
+        "calculated_combined_risk": 0.1745
       },
       "escalate": false
     },
@@ -151,7 +151,7 @@
       "metrics": {
         "semgrep_severity_score": 0.7,
         "slm_threat_probability": 0.7338,
-        "calculated_combined_risk": 0.7237
+        "calculated_combined_risk": 0.7203
       },
       "escalate": true
     },
@@ -161,7 +161,7 @@
       "metrics": {
         "semgrep_severity_score": 0.7,
         "slm_threat_probability": 0.0961,
-        "calculated_combined_risk": 0.2773
+        "calculated_combined_risk": 0.3377
       },
       "escalate": false
     },
@@ -171,7 +171,7 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.8641,
-        "calculated_combined_risk": 0.9049
+        "calculated_combined_risk": 1.0
       },
       "escalate": true
     },
@@ -181,7 +181,7 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.8641,
-        "calculated_combined_risk": 0.9049
+        "calculated_combined_risk": 1.0
       },
       "escalate": true
     },
@@ -191,7 +191,7 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.9038,
-        "calculated_combined_risk": 0.9327
+        "calculated_combined_risk": 1.0
       },
       "escalate": true
     },
@@ -201,7 +201,7 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.5081,
-        "calculated_combined_risk": 0.6557
+        "calculated_combined_risk": 1.0
       },
       "escalate": true
     },
@@ -211,7 +211,7 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.7216,
-        "calculated_combined_risk": 0.8051
+        "calculated_combined_risk": 1.0
       },
       "escalate": true
     },
@@ -221,7 +221,7 @@
       "metrics": {
         "semgrep_severity_score": 0.7,
         "slm_threat_probability": 0.7216,
-        "calculated_combined_risk": 0.7151
+        "calculated_combined_risk": 0.713
       },
       "escalate": true
     },
@@ -231,7 +231,7 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.7216,
-        "calculated_combined_risk": 0.8051
+        "calculated_combined_risk": 1.0
       },
       "escalate": true
     },
@@ -241,7 +241,7 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.7216,
-        "calculated_combined_risk": 0.8051
+        "calculated_combined_risk": 1.0
       },
       "escalate": true
     },
@@ -251,9 +251,9 @@
       "metrics": {
         "semgrep_severity_score": 1.0,
         "slm_threat_probability": 0.0465,
-        "calculated_combined_risk": 0.3326
+        "calculated_combined_risk": 1.0
       },
-      "escalate": false
+      "escalate": true
     },
     {
       "evaluated_file": "/home/passwd/CEVuD/tests/workspace_storage/app/views.py",
@@ -261,7 +261,7 @@
       "metrics": {
         "semgrep_severity_score": 0.7,
         "slm_threat_probability": 0.0465,
-        "calculated_combined_risk": 0.2425
+        "calculated_combined_risk": 0.3079
       },
       "escalate": false
     }
