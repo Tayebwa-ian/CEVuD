@@ -107,9 +107,10 @@ The fine-tuned local classification engine (`jayansh21/codesheriff-bug-classifie
 
 ### 5.3 Core Model Limitations & Mitigation Justifications
 While evaluating the paper's design paradigm, several constraints inherent to the underlying classifier must be acknowledged:
-* **Language Constraint:** The model is strictly trained on Python syntax. It cannot parse multi-language repositories (e.g., JavaScript/Go inter-op) without triggering high out-of-vocabulary exception states. *Mitigation:* The `TriageOrchestrator` uses file-extension pre-filtering to ensure only Python source paths route to the model.
-* **Context Window Constraints:** The sequence length ceiling is capped at 512 tokens. Massive functions containing hundreds of lines will undergo truncation, potentially discarding downstream sinks. *Mitigation:* The AST slicing engine isolates clean function scopes, keeping token inputs within model bounds for $98\%$ of enterprise functions (averaging 5–50 lines).
-* **Pattern Over-Reliance (Heuristic Bias):** The training data was constructed using heuristic patterns rather than manual human expert review. Consequently, certain classes like `Null Reference Risk` show weaker precision ($0.63$) because fragile code structures closely resemble secure structures. *Mitigation:* The pipeline leans on the static engine's explicit data flows to offset the model's structural blind spots.
+* **Language Constraint:** The model is strictly trained on Python syntax and cannot parse multi-language repositories without triggering high out-of-vocabulary exception states.
+* **Context Window Constraints:** The sequence length ceiling is capped at 512 tokens. Massive functions undergo truncation, potentially discarding downstream sinks.
+* **Vulnerability Representation Gap (Training Set Omission):** Empirical evidence reveals that the SLM fails significantly on cryptographic weaknesses (e.g., weak hashing in `hash_password`, weak encryption in `encrypt_data`), archive extraction flaws (e.g., Zip Slip in `extract_zip`), and dynamic rendering vulnerabilities (`render_user_profile`). Because cryptographic operations and file system stream reads closely mimic well-formed, "clean" logical sequences, the model outputs near-zero vulnerability probabilities ($1.1\% - 4.6\%$) if these specific API anti-patterns were absent or under-represented in its training data distribution.
+* **Negative Interference Gating Blindspot:** Because the mathematical framework weights the SLM heavily ($W_2 = 0.6$), an out-of-distribution vulnerability that drops the SLM score will aggressively suppress a valid Static Taint alert from Stage 1. For instance, when Semgrep flags a high-severity `ERROR` ($1.0$), an SLM probability of $0.02$ drags the final risk metric down to $R = (0.4 \cdot 1.0) + (0.6 \cdot 0.02) = 0.412$, which slips completely under a standard $0.52$ escalation gate threshold.
 
 ---
 
@@ -124,6 +125,7 @@ While evaluating the paper's design paradigm, several constraints inherent to th
 * **Cross-File Data Flow Tracing:** Expanding Stage 2 to pull structural call graphs (caller/callee relationships) dynamically from the SQLite local vector store when evaluating a localized snippet.
 * **LLM-Agnostic Benchmarking:** Evaluating the consistency of the Token Reduction Rate (TRR) across various high-tier commercial endpoints, comparing OpenAI's GPT-4o with Anthropic's Claude 3.5 Sonnet.
 * **On-Device Compilation Optimization:** Compiling the classification model into an ONNX runtime representation to allow execution across low-tier on-premise execution nodes without dedicated hardware acceleration.
+* **Asymmetric Risk Overrides (Fail-Safe Buffers):** To counteract the "Negative Interference Gating Blindspot" where a low SLM score suppresses an explicit static tool alert, future iterations will introduce a non-linear override constraint. If Stage 1 registers a static severity of `ERROR`, the system will bypass the composite weight calculation and enforce an automatic escalation baseline, ensuring out-of-distribution model slips do not compromise pipeline safety bounds.
 
 ---
 
@@ -141,3 +143,10 @@ The following metrics describe the full multi-stage framework running across the
 | **Pipeline Measured Specificity** | **91.7%** |
 | **Token Reduction Rate (TRR)** | **66.7%** |
 | **Cost Savings Ratio (CSR)** | **66.7%** |
+
+### 8.1 Critical Insights from Empirical Results Matrix
+An itemized diagnostic review of the 24 gold standard reference results yields three foundational insights for systemic optimization:
+
+1. **Total Shared Blindspots (Index 0):** In the case of logical flaws like Insecure Direct Object References (`get_user_by_id`), both Semgrep (Static Taint) and the SLM (Semantic Weights) returned a score of $0.0$. IDOR flaws do not violate syntax patterns or direct data flow rules, highlighting that low-level pipelines remain entirely blind to authorization state anomalies.
+2. **The Risk Suppression Trap (Indices 8, 14, 20, 22):** In four high-impact true positive vulnerabilities (XSS, password hashing, crypto encryption, and zip file extraction), Semgrep successfully triggered an `ERROR` flag ($1.0$). However, because the SLM failed to identify the semantic context ($P_{\text{slm}} \approx 0.01 - 0.04$), it suppressed these alerts, causing a complete failure to escalate. This proves that high-weight neural gating architectures degrade safety lines if the target domain contains out-of-distribution code variants.
+3. **High-Confidence True Positives (Indices 2, 4, 6, 12):** The pipeline achieves optimal efficiency ($R > 0.80$) on classic injections (Command Injection in `run_ping`, Path Traversal in `load_config`, and SSRF in `proxy_request`). In these segments, the structural layout is distinct, enabling both the static signatures and neural layers to align neatly and confirm the escalation decision.
