@@ -1,39 +1,41 @@
+# src/evaluate_pipeline.py
 """
 Pipeline Evaluation Harness
 ===========================
 Computes comprehensive detection effectiveness and cost-efficiency metrics
-by running the full Stage 1 + Stage 2 pipeline against a curated ground-truth
-dataset (gold_standard.json).
+by running the evaluation loop against a curated ground-truth dataset 
+(gold_standard.json) via the production TriageOrchestrator process pipeline.
+
+This module enforces a single source of truth by relying on the real Stage 1
+and Stage 2 staging engines to produce authentic filesystem artifacts and reports.
 
 Persisted Artifacts (per evaluation run):
-    - summary.json            : Quantitative metrics (Recall, Precision, Accuracy, F1, TRR, CSR)
-    - detailed_findings.json  : Per-case risk scores, severities, and escalation decisions
-    - semgrep_eval_results.json : Raw Stage 1 Semgrep output
-    - confusion_matrix.png    : Visual heatmap of TP/FP/TN/FN
-    - risk_distribution.png   : Histogram of risk scores with threshold overlay
-    - category_performance.png: Per-vulnerability-category detection bar chart
-    - input_ledger_snapshot.json : Frozen copy of the test data used for the run
+    - summary.json              : Quantitative metrics (Recall, Precision, Accuracy, F1, TRR, CSR)
+    - detailed_findings.json    : Per-case risk scores, severities, and escalation decisions
+    - confusion_matrix.png      : Visual heatmap of TP/FP/TN/FN
+    - risk_distribution.png     : Histogram of risk scores with threshold overlay
+    - category_performance.png  : Per-vulnerability-category detection bar chart
+    - input_ledger_snapshot.json: Frozen copy of the test data used for the run
 """
 
 import json
 import os
+import sys
 import shutil
+import tempfile
 import subprocess
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 
 import matplotlib
 matplotlib.use("Agg")  # Non-interactive backend for CI/headless environments
 import matplotlib.pyplot as plt
 
 from triage_orchestrator import TriageOrchestrator
-from vector_store import LocalVectorStore
 
 
 # ---------------------------------------------------------------------------
 # Default path to the gold-standard ground-truth dataset.
-# This file lives in tests/data/ so that it is co-located with the test suite
-# and can be referenced by both pytest and this evaluator.
 # ---------------------------------------------------------------------------
 _DEFAULT_GOLD_STANDARD = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -46,114 +48,72 @@ class PipelineEvaluator:
     End-to-end benchmark harness for the CEVuD security pipeline.
 
     Workflow:
-        1. Materialise gold-standard code snippets to temporary files on disk.
-        2. Execute a live Semgrep scan (Stage 1) against those files.
-        3. For every test case, run the CodeBERT SLM inference (Stage 2).
-        4. Apply the updated mathematical gating formula with safety overrides to compute a risk score.
-        5. Compare the pipeline's escalation decision against the ground-truth
-           label to populate a confusion matrix.
-        6. Derive Recall, Precision, Accuracy, F1, Token Reduction Rate (TRR),
-           and Cost Savings Ratio (CSR).
-        7. Persist all numerical results and visual charts to a versioned
-           directory under ``workspace_storage/evaluation_runs/``.
+        1. Materialize gold-standard code snippets to temporary files on disk.
+        2. Execute a live Semgrep subprocess over the generated codebase.
+        3. Invoke the `TriageOrchestrator` to aggregate results and score risk metrics.
+        4. Derive and graph performance and cost reduction metrics.
     """
 
     def __init__(self, config_path: str):
         """
-        Initialise the evaluator with pipeline weights, threshold bounds, and a unique run directory.
+        Initialize the evaluator and establish dynamic workspace routing.
 
         Args:
             config_path: Absolute or relative path to the master ``config.json``.
         """
-        with open(config_path, "r") as f:
+        self._config_path = os.path.abspath(config_path)
+        with open(self._config_path, "r") as f:
             self.config = json.load(f)
 
-        # Unpack gating parameters for quick access during scoring
-        self.w1 = self.config["gate_parameters"]["weight_static"]
-        self.w2 = self.config["gate_parameters"]["weight_slm"]
         self.threshold = self.config["gate_parameters"]["escalation_threshold"]
-        # 🎯 ASYMMETRIC GATE UPGRADE: Extract the neural short-circuit override boundary config
-        self.slm_override_threshold = self.config["gate_parameters"].get("slm_override_threshold", 0.90)
 
-        # Instantiate the real orchestrator so we can call slm_inference()
-        self.orchestrator = TriageOrchestrator(config_path)
-        self.vector_store = LocalVectorStore(config_path)
-
-        # Create a timestamped evaluation directory for this run.
-        # workspace_root and evaluations_subdir may both be absolute (test config)
-        # or relative (production config) - handle both cases.
+        # Establish timestamped evaluation run output path
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.eval_id = f"eval_{timestamp}"
+        
         ws_root = self.config["paths"]["workspace_root"]
         evals_sub = self.config["paths"]["evaluations_subdir"]
 
+        # Resolve evaluations destination folder cleanly
         if os.path.isabs(evals_sub):
-            # evaluations_subdir is already absolute (test config)
             self.eval_dir = os.path.join(evals_sub, self.eval_id)
         elif os.path.isabs(ws_root):
-            # workspace_root is absolute, evaluations_subdir is relative to it
             self.eval_dir = os.path.join(ws_root, evals_sub, self.eval_id)
         else:
-            # Both relative — join with cwd (production default)
             self.eval_dir = os.path.join(ws_root, evals_sub, self.eval_id)
 
+        # Enforce evaluation folder existence for summaries and charts
         os.makedirs(self.eval_dir, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Stage 1 helpers
-    # ------------------------------------------------------------------
-
-    def _prepare_benchmark_files(self, test_cases: list) -> str:
+    def _prepare_benchmark_files(self, test_cases: List[Dict[str, Any]]) -> str:
         """
-        Write each gold-standard snippet to its own ``.py`` file so that
-        Semgrep can perform a real filesystem scan.
-
-        IMPORTANT: Files are written to a ``tempfile.mkdtemp()`` directory
-        **outside the project tree** (e.g. ``/tmp/cevud_bench_XXXX``).
-        This guarantees that Semgrep's ``.gitignore`` / ``.semgrepignore``
-        integration — which would otherwise silently skip files nested under
-        ``workspace_storage/`` — cannot block the scan.
-
-        Args:
-            test_cases: List of dicts from ``gold_standard.json``.
-
-        Returns:
-            Absolute path to the temporary directory containing the files.
+        Write each gold-standard snippet to its own .py file inside an isolated
+        temporary folder outside the project tree to bypass ignore-mask rules.
         """
-        import tempfile
-        # Write outside the project tree so .gitignore/.semgrepignore never applies
-        temp_src_dir = tempfile.mkdtemp(prefix="cevud_bench_")
+        # BORROWED KNOWLEDGE: Write outside the project tree so local ignore rules (.gitignore/.semgrepignore) cannot mask evaluation vectors
+        bench_src_dir = tempfile.mkdtemp(prefix="cevud_bench_")
 
         for i, case in enumerate(test_cases):
             safe_fn = case["function_name"].replace(" ", "_")
             file_name = f"case_{i}_{safe_fn}.py"
-            with open(os.path.join(temp_src_dir, file_name), "w") as f:
+            with open(os.path.join(bench_src_dir, file_name), "w", encoding="utf-8") as f:
                 f.write(case["source_code"])
 
-        print(f"[*] Benchmark files materialised to: {temp_src_dir}")
-        return temp_src_dir
+        print(f"[*] Benchmark test cases materialized to isolated path: {bench_src_dir}")
+        return bench_src_dir
 
-    def _run_live_semgrep(self, target_dir: str) -> dict:
+    def _run_live_semgrep(self, target_dir: str, output_path: str) -> dict:
         """
         Execute the Semgrep CLI against *target_dir* using the same rule-set
         as the production CI pipeline.
-
-        Args:
-            target_dir: Directory containing the materialised benchmark files.
-
-        Returns:
-            Parsed JSON output from Semgrep (or an empty results dict on failure).
         """
-        output_path = os.path.join(self.eval_dir, "semgrep_eval_results.json")
-
-        # Resolve the custom taint-rules YAML relative to the project root
+        # Resolve custom appsec rules relative to project root
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         custom_rules_path = os.path.join(
             base_dir, "semgrep_rules", "custom_appsec_rules.yaml"
         )
 
-        # Find all python files to scan. Passing files directly to Semgrep
-        # bypasses its default ignore patterns (like excluding directories named "tests")
+        # Explicitly collect files to bypass directory filtering rules
         target_files = [
             os.path.join(target_dir, f)
             for f in os.listdir(target_dir)
@@ -178,364 +138,331 @@ class PipelineEvaluator:
                 print(f"[-] Semgrep Error Output:\n{result.stderr}")
 
         if os.path.exists(output_path):
-            with open(output_path, "r") as f:
+            with open(output_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         return {"results": []}
 
-    # ------------------------------------------------------------------
-    # Core evaluation loop
-    # ------------------------------------------------------------------
+    def _execute_orchestration_run(self, bench_dir: str):
+        """
+        Invoke the primary production orchestrator pipeline over the evaluation workspace.
+        """
+        run_id = f"run_{os.getenv('GITHUB_RUN_ID') or os.getenv('GITHUB_SHA') or 'local-dev-run'}"
+        target_artifact_dir = os.path.join(self.eval_dir, self.config["paths"]["artifacts_subdir"], run_id)
+        os.makedirs(target_artifact_dir, exist_ok=True)
+
+        # Enforce that Semgrep outputs to the directory where TriageOrchestrator looks
+        semgrep_filename = self.config["paths"]["semgrep_output"]
+        target_semgrep_json = os.path.join(bench_dir, semgrep_filename)
+        
+        self._run_live_semgrep(bench_dir, target_semgrep_json)
+
+        print("[*] Executing production TriageOrchestrator over benchmark folder...")
+        orchestrator = TriageOrchestrator(
+            config_path=self._config_path,
+            workspace_path=bench_dir
+        )
+        
+        orchestrator.artifact_dir = target_artifact_dir
+        orchestrator.process_pipeline()
+
+    def _parse_triage_report(self) -> Dict[str, Any]:
+        """
+        Locate and load the generated triage report from the orchestrator's run directory.
+
+        Returns:
+            The parsed JSON content from the generated stage 2 triage report.
+        """
+        artifacts_subdir = self.config["paths"]["artifacts_subdir"]
+        artifacts_path = os.path.join(self.eval_dir, artifacts_subdir)
+
+        if not os.path.exists(artifacts_path):
+            raise FileNotFoundError(f"Orchestrator artifact root missing from evaluation runtime: {artifacts_path}")
+
+        run_dirs = [d for d in os.listdir(artifacts_path) if d.startswith("run_")]
+        if not run_dirs:
+            raise FileNotFoundError(f"No triage run execution directories discovered under {artifacts_path}")
+
+        # Target the most recently generated runtime path
+        latest_run_dir = max(
+            [os.path.join(artifacts_path, d) for d in run_dirs],
+            key=os.path.getmtime
+        )
+        triage_report_path = os.path.join(latest_run_dir, self.config["paths"]["triage_report"])
+
+        if not os.path.exists(triage_report_path):
+            raise FileNotFoundError(f"Stage 2 triage report data file not found: {triage_report_path}")
+
+        with open(triage_report_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _compute_metrics(self, test_cases: List[Dict[str, Any]], triage_data: Dict[str, Any]) -> Tuple[Dict[str, Any], List[float], List[Dict[str, Any]]]:
+        """
+        Align the static evaluation ground truth cases against the dynamic orchestrator findings.
+
+        Args:
+            test_cases: The ground truth test records ledger data.
+            triage_data: The deserialized triage report produced by the orchestrator loop.
+        """
+        findings_map = {}
+        for finding in triage_data.get("findings", []):
+            findings_map[finding["evaluated_file"]] = finding
+
+        tp = fp = fn = tn = 0
+        escalations = 0
+        all_risk_scores: List[float] = []
+        detailed_findings: List[Dict[str, Any]] = []
+
+        print(f"\n=== Mapping Pipeline Triage Decisions to Ground Truth ({len(test_cases)} cases) ===")
+
+        for i, case in enumerate(test_cases):
+            func_name = case["function_name"]
+            is_vuln = case["is_vulnerable"] == 1
+            
+            safe_fn = func_name.replace(" ", "_")
+            expected_filename = f"case_{i}_{safe_fn}.py"
+
+            matching_finding = None
+            for file_key, finding_payload in findings_map.items():
+                if file_key.endswith(expected_filename):
+                    matching_finding = finding_payload
+                    break
+
+            if matching_finding is not None:
+                escalated = matching_finding["escalate"]
+                risk_score = matching_finding["metrics"]["calculated_combined_risk"]
+                semgrep_sev = matching_finding["metrics"].get("semgrep_severity_score", 0.0)
+                slm_prob = matching_finding["metrics"].get("slm_threat_probability", 0.0)
+            else:
+                escalated = False
+                risk_score = 0.0
+                semgrep_sev = 0.0
+                slm_prob = 0.0
+
+            all_risk_scores.append(risk_score)
+            if escalated:
+                escalations += 1
+
+            if is_vuln and escalated:
+                tp += 1
+            elif is_vuln and not escalated:
+                fn += 1
+            elif not is_vuln and escalated:
+                fp += 1
+            else:
+                tn += 1
+
+            detailed_findings.append({
+                "index": i,
+                "function_name": func_name,
+                "file_path": case["file_path"],
+                "is_vulnerable": case["is_vulnerable"],
+                "semgrep_severity": semgrep_sev,
+                "slm_probability": slm_prob,
+                "risk_score": round(risk_score, 4),
+                "escalated": escalated
+            })
+
+            print(
+                f"  [{i:02d}] {func_name:25s} | "
+                f"Risk: {risk_score:.3f} | "
+                f"Escalated: {str(escalated):5s} | "
+                f"Ground Truth: {'VULN' if is_vuln else 'SAFE'}"
+            )
+
+        total = len(test_cases)
+        metrics = {
+            "recall": round(tp / (tp + fn) if (tp + fn) > 0 else 0.0, 4),
+            "precision": round(tp / (tp + fp) if (tp + fp) > 0 else 0.0, 4),
+            "accuracy": round((tp + tn) / total if total > 0 else 0.0, 4),
+            "f1_score": round(2 * (tp / (tp + fp) * (tp / (tp + fn))) / ((tp / (tp + fp)) + (tp / (tp + fn))) if (tp + fp) > 0 and (tp + fn) > 0 else 0.0, 4),
+            "specificity": round(tn / (tn + fp) if (tn + fp) > 0 else 0.0, 4),
+            "token_reduction_rate": round((1 - (escalations / total)) * 100 if total > 0 else 0.0, 2),
+            "cost_savings_ratio": round(((total - escalations) / total) * 100 if total > 0 else 0.0, 2)
+        }
+
+        confusion_matrix = {"tp": tp, "fp": fp, "fn": fn, "tn": tn}
+        return {"confusion_matrix": confusion_matrix, "metrics": metrics, "total_cases": total, "escalations": escalations}, all_risk_scores, detailed_findings
+
+    def _save_and_display_results(self, summary_payload: Dict[str, Any], detailed_findings: List[Dict[str, Any]], all_risk_scores: List[float]):
+        """Save results down to files and dump the final metric visualization dashboard."""
+        with open(os.path.join(self.eval_dir, "summary.json"), "w", encoding="utf-8") as f:
+            json.dump(summary_payload, f, indent=2)
+
+        with open(os.path.join(self.eval_dir, "detailed_findings.json"), "w", encoding="utf-8") as f:
+            json.dump(detailed_findings, f, indent=2)
+
+        cm = summary_payload["confusion_matrix"]
+        self._generate_graphs(cm["tp"], cm["fp"], cm["fn"], cm["tn"], all_risk_scores, detailed_findings)
+
+        metrics = summary_payload["metrics"]
+        print("\n" + "=" * 58)
+        print("        PIPELINE EVALUATION DASHBOARD")
+        print("=" * 58)
+        print(f"  Run ID                  : {self.eval_id}")
+        print(f"  Total Cases Tested      : {summary_payload['total_cases']}")
+        print(f"  Total Escalations       : {summary_payload['escalations']}")
+        print(f"  ─── Detection Metrics ───")
+        print(f"  Recall (Sensitivity)    : {metrics['recall'] * 100:.1f}%")
+        print(f"  Precision               : {metrics['precision'] * 100:.1f}%")
+        print(f"  Accuracy                : {metrics['accuracy'] * 100:.1f}%")
+        print(f"  F1 Score                : {metrics['f1_score']:.4f}")
+        print(f"  Specificity             : {metrics['specificity'] * 100:.1f}%")
+        print(f"  ─── Cost Metrics ────────")
+        print(f"  Token Reduction Rate    : {metrics['token_reduction_rate']:.1f}%")
+        print(f"  Cost Savings Ratio      : {metrics['cost_savings_ratio']:.1f}%")
+        print("=" * 58)
+        print(f"  [+] Artifacts saved to: {self.eval_dir}")
+
+        if metrics['recall'] >= 0.95 and metrics['token_reduction_rate'] >= 50.0:
+            print("  [+] Target Met: Pipeline is cost-efficient and structurally secure.")
+        else:
+            print("  [⚠️] Optimization Required: Adjust parameters inside config.json.")
 
     def run_evaluation(self, ledger_path: str):
         """
-        Run every gold-standard test case through the real pipeline and
-        compare the outcome against the ground-truth label.
-
-        This method:
-            * Materialises snippets → runs Semgrep → runs CodeBERT inference.
-            * Applies the newly integrated asymmetric short-circuiting override logic.
-            * Computes a full confusion matrix and derived metrics.
-            * Writes ``summary.json``, ``detailed_findings.json``, and charts
-              into the versioned evaluation directory.
-
-        Args:
-            ledger_path: Path to the JSON file containing the gold-standard
-                         test cases (``tests/data/gold_standard.json``).
+        Execute the modular pipeline evaluation harness against ground truth inputs
+        and mirror real-time findings to the fallback staging folder for E2E tests.
         """
-        # Freeze a copy of the input data alongside the results for auditability
-        shutil.copy2(
-            ledger_path,
-            os.path.join(self.eval_dir, "input_ledger_snapshot.json"),
-        )
+        # Snapshot input data ledger
+        shutil.copy2(ledger_path, os.path.join(self.eval_dir, "input_ledger_snapshot.json"))
 
-        with open(ledger_path, "r") as f:
+        with open(ledger_path, "r", encoding="utf-8") as f:
             test_cases: List[Dict[str, Any]] = json.load(f)
 
+        # 1. Materialize source text blocks outside repo tree boundaries
         bench_dir = self._prepare_benchmark_files(test_cases)
 
         try:
-            semgrep_results = self._run_live_semgrep(bench_dir)
+            # 2. Run the dynamic execution loop using the isolated benchmark path
+            self._execute_orchestration_run(bench_dir)
 
-            # Build a lookup: benchmark filename → highest Semgrep severity string.
-            # A file may match multiple rules; we keep the worst (highest weight) result.
-            _sev_rank = {"ERROR": 3, "WARNING": 2, "INFO": 1, "NONE": 0}
-            findings_map: Dict[str, str] = {}
-            for res in semgrep_results.get("results", []):
-                fname = os.path.basename(res["path"])
-                sev = res["extra"]["severity"]
-                # Only promote, never demote
-                if _sev_rank.get(sev, 0) > _sev_rank.get(findings_map.get(fname, "NONE"), 0):
-                    findings_map[fname] = sev
-            print(f"[*] Semgrep matched {len(findings_map)} unique benchmark files.")
+            # 3. Process calculations against the generated workspace reports
+            triage_data = self._parse_triage_report()
+            summary_payload, risk_scores, detailed_findings = self._compute_metrics(test_cases, triage_data)
+            
+            summary_payload["eval_id"] = self.eval_id
+            summary_payload["timestamp"] = datetime.now().isoformat()
 
-            # --- Confusion matrix accumulators ---
-            tp = fp = fn = tn = 0
-            escalations = 0
-            all_risk_scores: List[float] = []
-            detailed_findings: List[Dict[str, Any]] = []
+            # 4. Save metrics visualizations down into evaluation_runs storage
+            self._save_and_display_results(summary_payload, detailed_findings, risk_scores)
 
-            print(
-                f"\n=== Running Pipeline Evaluation Loop "
-                f"({len(test_cases)} cases) ==="
-            )
-
-            for i, case in enumerate(test_cases):
-                # 1. Resolve which Semgrep severity was found for this case
-                safe_fn = case["function_name"].replace(" ", "_")
-                target_fname = f"case_{i}_{safe_fn}.py"
-                sev_str = findings_map.get(target_fname, "NONE")
-                s_sev = self.config["semgrep_severity_map"].get(sev_str, 0.0)
-
-                # --------------------------------------------------------------
-                # Context-Aware Window Extension
-                # Trace upstream callers and downstream sinks to build a multi-file window
-                # --------------------------------------------------------------
-                context_blocks = self.vector_store.get_explicit_flow_context(case["function_name"])
+            # 5. Mirror runtime artifacts back into production workspace tree
+            # This bridges the gap between evaluation runs and the downstream Phase 3 E2E test.
+            try:
+                run_id = triage_data.get("run_id", "run_local-dev-run")
                 
-                # Pre-populate the input window with the target modification snippet
-                unified_source_window = case["source_code"]
-                for block in context_blocks:
-                    unified_source_window += f"\n# Context Flow Lineage from File: {block['file_path']}\n"
-                    unified_source_window += block['source_code']
+                # Resolve the configuration paths directly from config file definitions
+                ws_root = self.config["paths"].get("workspace_root", ".")
+                if not os.path.isabs(ws_root):
+                    # Fall back relative to the active master configuration directory layout
+                    config_dir = os.path.dirname(self._config_path)
+                    ws_root = os.path.abspath(os.path.join(config_dir, ws_root))
 
-                # 2. Run real CodeBERT inference on the expanded, unified source window
-                p_slm = self.orchestrator.slm_inference(unified_source_window)
+                # Build production destination: workspace_storage_e2e/artifacts/run_local-dev-run/
+                prod_artifact_dir = os.path.join(ws_root, self.config["paths"]["artifacts_subdir"], run_id)
+                eval_artifact_dir = os.path.join(self.eval_dir, self.config["paths"]["artifacts_subdir"], run_id)
 
-                # 3. Apply the base gating formula: R = (W1 × S_sev) + (W2 × P_slm)
-                risk_score = (self.w1 * s_sev) + (self.w2 * p_slm)
-                
-                # 🚨 ASYMMETRIC SHORT-CIRCUIT CHECKS
-                # Ensure the evaluator calculates escalation states using the identical overrides 
-                # running inside production orchestration pipelines.
-                static_override = (s_sev >= 1.0)
-                slm_override = (p_slm > self.slm_override_threshold)
-                
-                escalated = (risk_score >= self.threshold) or static_override or slm_override
-
-                # If a safety override short-circuit triggers, upscale the reported risk mapping index
-                reported_risk = max(risk_score, 1.0) if (static_override or slm_override) else risk_score
-                all_risk_scores.append(reported_risk)
-
-                if escalated:
-                    escalations += 1
-
-                # 4. Compare against ground-truth to populate confusion matrix
-                is_vuln = case["is_vulnerable"] == 1
-                if is_vuln and escalated:
-                    tp += 1
-                elif is_vuln and not escalated:
-                    fn += 1
-                elif not is_vuln and escalated:
-                    fp += 1
-                else:
-                    tn += 1
-
-                # 5. Record per-case detail for persistent storage
-                detailed_findings.append({
-                    "index": i,
-                    "function_name": case["function_name"],
-                    "file_path": case["file_path"],
-                    "is_vulnerable": case["is_vulnerable"],
-                    "semgrep_severity": sev_str,
-                    "static_weight": round(s_sev, 4),
-                    "slm_probability": round(p_slm, 4),
-                    "risk_score": round(reported_risk, 4),
-                    "escalated": escalated,
-                    "override_triggered": (static_override or slm_override)
-                })
-
-                print(
-                    f"  [{i:02d}] {case['function_name']:25s} | "
-                    f"Risk: {reported_risk:.3f} | "
-                    f"Escalated: {str(escalated):5s} | "
-                    f"Ground Truth: {'VULN' if is_vuln else 'SAFE'}"
-                )
-
-            # ----------------------------------------------------------
-            # Metric computation
-            # ----------------------------------------------------------
-            total = len(test_cases)
-
-            # Detection effectiveness
-            relative_recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            relative_precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            relative_accuracy = (tp + tn) / total if total > 0 else 0.0
-            f1_score = (
-                2 * (relative_precision * relative_recall) / (relative_precision + relative_recall)
-                if (relative_precision + relative_recall) > 0
-                else 0.0
-            )
-            relative_specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-
-            # Cost-efficiency
-            token_reduction_rate = (1 - (escalations / total)) * 100 if total > 0 else 0.0
-            cost_savings_ratio = (
-                (total - escalations) / total * 100 if total > 0 else 0.0
-            )
-
-            # ----------------------------------------------------------
-            # Persist quantitative summary
-            # ----------------------------------------------------------
-            summary = {
-                "eval_id": self.eval_id,
-                "timestamp": datetime.now().isoformat(),
-                "total_cases": total,
-                "escalations": escalations,
-                "confusion_matrix": {
-                    "tp": tp, "fp": fp,
-                    "fn": fn, "tn": tn,
-                },
-                "metrics": {
-                    "recall": round(relative_recall, 4),
-                    "precision": round(relative_precision, 4),
-                    "accuracy": round(relative_accuracy, 4),
-                    "f1_score": round(f1_score, 4),
-                    "specificity": round(relative_specificity, 4),
-                    "token_reduction_rate": round(token_reduction_rate, 2),
-                    "cost_savings_ratio": round(cost_savings_ratio, 2),
-                },
-            }
-
-            summary_path = os.path.join(self.eval_dir, "summary.json")
-            with open(summary_path, "w") as f:
-                json.dump(summary, f, indent=2)
-
-            # Persist the per-case detailed findings
-            details_path = os.path.join(self.eval_dir, "detailed_findings.json")
-            with open(details_path, "w") as f:
-                json.dump(detailed_findings, f, indent=2)
-
-            # ----------------------------------------------------------
-            # Generate visual chart artifacts
-            # ----------------------------------------------------------
-            self._generate_graphs(tp, fp, fn, tn, all_risk_scores, detailed_findings)
-
-            # ----------------------------------------------------------
-            # Print the dashboard
-            # ----------------------------------------------------------
-            print("\n" + "=" * 58)
-            print("        PIPELINE EVALUATION DASHBOARD")
-            print("=" * 58)
-            print(f"  Run ID                  : {self.eval_id}")
-            print(f"  Total Cases Tested      : {total}")
-            print(f"  Total Escalations       : {escalations}")
-            print(f"  ─── Detection Metrics ───")
-            print(f"  Recall (Sensitivity)    : {relative_recall * 100:.1f}%")
-            print(f"  Precision               : {relative_precision * 100:.1f}%")
-            print(f"  Accuracy                : {relative_accuracy * 100:.1f}%")
-            print(f"  F1 Score                : {f1_score:.4f}")
-            print(f"  Specificity             : {relative_specificity * 100:.1f}%")
-            print(f"  ─── Cost Metrics ────────")
-            print(f"  Token Reduction Rate    : {token_reduction_rate:.1f}%")
-            print(f"  Cost Savings Ratio      : {cost_savings_ratio:.1f}%")
-            print("=" * 58)
-            print(f"  [+] Artifacts saved to: {self.eval_dir}")
-
-            if relative_recall >= 0.95 and token_reduction_rate >= 50.0:
-                print(
-                    "  [+] Target Met: Pipeline is cost-efficient "
-                    "and structurally secure."
-                )
-            else:
-                print(
-                    "  [⚠️] Optimisation Required: Adjust weights in "
-                    "config.json to balance safety and cost."
-                )
+                if os.path.exists(eval_artifact_dir):
+                    os.makedirs(prod_artifact_dir, exist_ok=True)
+                    for file_name in os.listdir(eval_artifact_dir):
+                        src_f = os.path.join(eval_artifact_dir, file_name)
+                        dst_f = os.path.join(prod_artifact_dir, file_name)
+                        if os.path.isfile(src_f):
+                            shutil.copy2(src_f, dst_f)
+                    print(f"[+] Successfully synced validation findings to fallback test root: {prod_artifact_dir}")
+            except Exception as sync_err:
+                print(f"[!] Target mirroring warning encountered: {sync_err}")
 
         finally:
-            # Clean up the temporary benchmark source files
+            # Clear down runtime files out of volatile directories safely
             if os.path.exists(bench_dir):
-                print(f"[*] Cleaning up temporary benchmarks in {bench_dir}...")
+                print(f"[*] Cleaning up temporary benchmark files from {bench_dir}...")
                 shutil.rmtree(bench_dir)
 
-    # ------------------------------------------------------------------
-    # Visualisation helpers
-    # ------------------------------------------------------------------
-
-    def _generate_graphs(
-        self,
-        tp: int, fp: int, fn: int, tn: int,
-        scores: List[float],
-        detailed_findings: List[Dict[str, Any]],
-    ):
-        """
-        Produce persistent visual artifacts for the evaluation run.
-        """
-        # ---- 1. Risk Score Distribution Histogram ----
+    def _generate_graphs(self, tp: int, fp: int, fn: int, tn: int, scores: List[float], detailed_findings: List[Dict[str, Any]]):
+        """Produce visualization charts for risk trends and classification accuracy results."""
+        # Risk Distribution Histogram Chart
         plt.figure(figsize=(10, 5))
         plt.hist(scores, bins=15, color="skyblue", edgecolor="black", alpha=0.85)
-        plt.axvline(
-            self.threshold,
-            color="red", linestyle="dashed", linewidth=2,
-            label=f"Threshold ({self.threshold})",
-        )
-        plt.title("Risk Score Distribution across Test Suite")
-        plt.xlabel("Calculated Risk (R)")
-        plt.ylabel("Frequency")
+        plt.axvline(self.threshold, color="red", linestyle="dashed", linewidth=2, label=f"Threshold ({self.threshold})")
+        plt.title("Evaluation Run Risk Score Distribution")
+        plt.xlabel("Calculated Risk Metric Score")
+        plt.ylabel("Sample Density / Frequency")
         plt.legend()
         plt.tight_layout()
         plt.savefig(os.path.join(self.eval_dir, "risk_distribution.png"), dpi=150)
         plt.close()
 
-        # ---- 2. Confusion Matrix Heatmap ----
+        # Heatmap Confusion Matrix Presentation
         cm = [[tn, fp], [fn, tp]]
         fig, ax = plt.subplots(figsize=(6, 5))
         cax = ax.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
         fig.colorbar(cax)
-
         for row in range(2):
             for col in range(2):
-                ax.text(col, row, str(cm[row][col]),
-                        ha="center", va="center", fontsize=18, fontweight="bold")
-
+                ax.text(col, row, str(cm[row][col]), ha="center", va="center", fontsize=18, fontweight="bold")
         ax.set_xticks([0, 1])
         ax.set_yticks([0, 1])
         ax.set_xticklabels(["Predicted Safe", "Predicted Vuln"])
         ax.set_yticklabels(["Actual Safe", "Actual Vuln"])
-        ax.set_xlabel("Predicted Label")
-        ax.set_ylabel("Actual Label")
-        ax.set_title("Confusion Matrix")
+        ax.set_xlabel("Pipeline Judgment Label")
+        ax.set_ylabel("Ground Truth Validation Label")
+        ax.set_title("Confusion Matrix Dashboard Metric View")
         plt.tight_layout()
         plt.savefig(os.path.join(self.eval_dir, "confusion_matrix.png"), dpi=150)
         plt.close()
 
-        # ---- 3. Per-Category Detection Bar Chart ----
+        # Category Performance Breakdown Charts
         category_stats: Dict[str, Dict[str, int]] = {}
         for finding in detailed_findings:
             cat = os.path.splitext(os.path.basename(finding["file_path"]))[0]
             if cat not in category_stats:
                 category_stats[cat] = {"correct": 0, "total": 0}
             category_stats[cat]["total"] += 1
-
             is_vuln = finding["is_vulnerable"] == 1
-            correctly_classified = (
-                (is_vuln and finding["escalated"])
-                or (not is_vuln and not finding["escalated"])
-            )
-            if correctly_classified:
+            if (is_vuln and finding["escalated"]) or (not is_vuln and not finding["escalated"]):
                 category_stats[cat]["correct"] += 1
 
         categories = sorted(category_stats.keys())
-        accuracies = [
-            category_stats[c]["correct"] / category_stats[c]["total"] * 100
-            for c in categories
-        ]
+        accuracies = [(category_stats[c]["correct"] / category_stats[c]["total"] * 100) for c in categories]
 
         plt.figure(figsize=(10, 5))
         bars = plt.bar(categories, accuracies, color="mediumseagreen", edgecolor="black")
         for bar, acc in zip(bars, accuracies):
-            plt.text(
-                bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
-                f"{acc:.0f}%", ha="center", va="bottom", fontsize=9,
-            )
+            plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1, f"{acc:.0f}%", ha="center", va="bottom", fontsize=9)
         plt.ylim(0, 115)
-        plt.title("Per-Category Detection Accuracy")
-        plt.xlabel("Vulnerability Category")
-        plt.ylabel("Accuracy (%)")
+        plt.title("Per-Category Vulnerability Detection Accuracy Breakdown")
+        plt.xlabel("Target Vulnerability Module Class Type")
+        plt.ylabel("Accuracy Level Percentage (%)")
         plt.xticks(rotation=35, ha="right")
         plt.tight_layout()
         plt.savefig(os.path.join(self.eval_dir, "category_performance.png"), dpi=150)
         plt.close()
 
 
-# ======================================================================
-# CLI entry point
-# ======================================================================
-
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="CEVuD Pipeline Evaluator — benchmark the detection pipeline "
-                    "against the gold-standard ground-truth dataset."
-    )
-    parser.add_argument(
-        "--config", default="config.json",
-        help="Path to the master config.json (default: config.json)",
-    )
-    parser.add_argument(
-        "--ledger", default=None,
-        help="Path to the gold-standard JSON ledger. "
-             "Defaults to tests/data/gold_standard.json.",
-    )
-    parser.add_argument(
-        "--seed", action="store_true",
-        help="Run the dataset_ingest benchmark seeder before evaluation.",
-    )
+    parser = argparse.ArgumentParser(description="CEVuD Pipeline Evaluator — production verification harness.")
+    parser.add_argument("--config", default="config.json", help="Path to the master config.json file.")
+    parser.add_argument("--ledger", default=None, help="Path to the gold-standard validation file registry ledger.")
+    parser.add_argument("--seed", action="store_true", help="Run the dataset_ingest benchmark database seeder prior to processing evaluation.")
 
     args = parser.parse_args()
+    ledger_target = args.ledger or _DEFAULT_GOLD_STANDARD
 
-    ledger = args.ledger or _DEFAULT_GOLD_STANDARD
-    if not os.path.exists(ledger):
-        print(f"[-] Ledger file not found: {ledger}")
+    if not os.path.exists(ledger_target):
+        print(f"[-] Evaluation Ledger Manifest registry missing: {ledger_target}")
         raise SystemExit(1)
 
     if args.seed:
-        print("[*] Seeding benchmark data before evaluation...")
-        os.system(
-            f"python src/dataset_ingest.py --mode benchmark --file {ledger}"
-        )
+        print("[*] Pre-seeding database vector blocks prior to launch initialization...")
+        try:
+            subprocess.run([sys.executable, "src/dataset_ingest.py", "--mode", "benchmark", "--file", ledger_target], check=True, capture_output=True, text=True)
+            print("[+] Target metrics vectors populated successfully.")
+        except subprocess.CalledProcessError as e:
+            print(f"[-] Database pre-seeding pipeline failure encountered: {e.stderr}")
+            raise SystemExit(1)
 
     evaluator = PipelineEvaluator(args.config)
-    evaluator.run_evaluation(ledger)
-    
+    evaluator.run_evaluation(ledger_target)

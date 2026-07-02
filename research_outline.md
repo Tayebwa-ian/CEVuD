@@ -102,7 +102,7 @@ To resolve cross-file dependencies without exceeding model context window constr
 ## 4. Experimental Evaluation & Empirical Results
 
 ### 4.1 Evaluation Framework and Ground-Truth Baseline
-The CEVuD orchestration architecture was evaluated using a benchmarking harness tracking 24 core software security test cases containing balanced ground-truth labels (comprising both high-impact true positive vulnerabilities and secure design variations across web API routes, authentication logic, and cryptographic handlers). The system was evaluated using production weighting variables configured to $W_1 = 0.4$ and $W_2 = 0.6$ with an escalation breach threshold of $T_{\text{escalation}} = 0.50$ and a local SLM neural short-circuit override boundary of $P_{\text{slm}} > 0.90$.
+The CEVuD orchestration architecture was evaluated using a benchmarking harness tracking 24 core software security test cases containing balanced ground-truth labels (comprising both high-impact true positive vulnerabilities and secure design variations across web API routes, authentication logic, and cryptographic handlers). The system was evaluated using production weighting variables configured to $W_1 = 0.4$ and $W_2 = 0.6$ with an escalation breach threshold of $T_{\text{escalation}} = 0.52$ and a local SLM neural short-circuit override boundary of $P_{\text{slm}} > 0.90$.
 
 ### 4.2 Quantitative Detection Matrix
 The system's decision boundary outcomes populated the following structural confusion matrix coordinates:
@@ -211,7 +211,7 @@ The empirical distribution of decision states settled into the following structu
 1. **Total Sample Set ($N$):** 24 distinct software routines spanning vulnerability and secure-patch variants.
 2. **Escalations Incurred:** 14 cases ($58.33\%$ of the codebase required high-tier LLM processing).
 3. **Filter Rate:** 10 cases ($41.67\%$ of code blocks were safely mitigated and resolved locally at edge boundaries).
-4. **The False Negative Delta ($FN = 1$):** Out of 12 actual vulnerable cases, exactly 1 case eluded the combined gate. This occurred because a low-level static signature map (`INFO` severity = 0.3) coincided with an intermediate local model prediction ($P_{\text{slm}} = 0.50$), generating a composite risk score of $R = (0.4 \cdot 0.3) + (0.6 \cdot 0.50) = 0.42$. Because this remained below the $T = 0.50$ trigger line without hitting an override threshold, it highlights a narrow localized evasion window for weak semantic indicators.
+4. **The False Negative Delta ($FN = 1$):** Out of 12 actual vulnerable cases, exactly 1 case eluded the combined gate. This occurred because a low-level static signature map (`INFO` severity = 0.3) coincided with an intermediate local model prediction ($P_{\text{slm}} = 0.50$), generating a composite risk score of $R = (0.4 \cdot 0.3) + (0.6 \cdot 0.50) = 0.42$. Because this remained below the $T = 0.52$ trigger line without hitting an override threshold, it highlights a narrow localized evasion window for weak semantic indicators.
 5. **The False Positive Influx ($FP = 3$):** Three secure structural variations were defensively escalated. This behavior represents an intentional system property: when a developer utilizes ambiguous structural syntax that matches a high-severity static pattern, the orchestrator errs on the side of safety, routing the context to Stage 3 for definitive evaluation.
 
 ### 9.1 Critical Insights from Empirical Results Matrix

@@ -1,118 +1,97 @@
-# CEVuD Usage Guide: Local & Remote Execution
+# Usage Guide
 
-This document provides technical instructions for running the Cost-Effective Vulnerability Detection (CEVuD) pipeline.
+## Prerequisites
 
-## 1. Local Development Setup
+- Python 3.10 or newer
+- Semgrep installed in the environment
+- Access to the local model assets or a working Hugging Face cache
+- Optional API credentials for Stage 3 if you want LLM-based synthesis
 
-### Prerequisites
-- **Python:** 3.10 or higher (Optimized for 3.14.6)
-- **Static Analysis:** [Semgrep OSS](https://semgrep.dev/docs/getting-started/) installed (`pip install semgrep`)
-- **Hardware:** CPU-based inference is supported for Stage 2 (CodeBERT).
+Install the Python dependencies:
 
-### Installation
 ```bash
 pip install -r requirements.txt
+pip install semgrep
 ```
 
-### Environment Variables
-If you intend to run Stage 3 (Deep Synthesis), set your LLM API key:
+## Local execution
+
+### 1. Seed the local vector store
+
+Use benchmark mode to populate the SQLite store with the bundled gold-standard examples:
+
 ```bash
-export OPENAI_API_KEY='your-api-key-here'
+python src/dataset_ingest.py --mode benchmark --file tests/data/gold_standard.json
 ```
 
-### Step-by-Step Execution
+Use repository mode to index a target repository:
 
-#### A. Ingestion (Seeding Context)
-Before running the pipeline, you must populate the `LocalVectorStore`.
-
-*   **Benchmark Mode:** Seed the DB and deploy code samples for manual testing.
-    ```bash
-    python src/dataset_ingest.py --mode benchmark --file tests/data/gold_standard.json
-    ```
-    *This creates a `vulnerability_samples/` directory containing the test code.*
-
-*   **Repository Mode:** Index an entire local codebase for RAG context.
-    ```bash
-    python src/dataset_ingest.py --mode repo --path /path/to/your/code
-    ```
-
-#### B. Stage 1: Static Analysis
-Scan the target codebase to generate a findings report (run this command inside the target repo or point it there).
 ```bash
-semgrep --config p/python --config ./semgrep_rules/custom_appsec_rules.yaml --exclude tests --json --output /path/to/your/code/semgrep_results.json /path/to/your/code
+python src/dataset_ingest.py --mode repo --path /path/to/target/code
 ```
 
-#### C. Stage 2: Triage & Mathematical Gating
-Compute the Risk Score ($R$) using the CodeBERT SLM relative to the target codebase.
+### 2. Run the static analysis stage
+
+Run Semgrep against the target repository:
+
 ```bash
-python src/triage_orchestrator.py --workspace /path/to/your/code --exclude-dirs "tests,venv,workspace_storage"
+semgrep --config p/python --config ./semgrep_rules/custom_appsec_rules.yaml --no-git-ignore --exclude tests --exclude workspace_storage --json --output /path/to/target/semgrep_results.json /path/to/target
 ```
-*Check `stage1_2_triage.json` within the target's `workspace_storage/artifacts/run_<ID>/` directory to see if the escalation threshold was met.*
 
-#### D. Stage 3: Deep Synthesis
-If the gating logic triggers escalation, run the Reasoning Agent on the target workspace:
+The output file should then be available at the path you specified.
+
+### 3. Run the triage stage
+
 ```bash
-python src/agent.py --workspace /path/to/your/code
-```
-The final report will be stored in `/path/to/your/code/workspace_storage/artifacts/run_<ID>/remediation_dossier.md`.
-
----
-
-## 2. Remote Execution (GitHub Actions)
-
-### Option A: Reusable Workflow (Scanning Third-Party Repositories)
-To scan a completely different codebase in another repository, you can call the reusable workflow directly from your GitHub Actions YAML file.
-
-Create `.github/workflows/security_scan.yml` in your target repository:
-```yaml
-name: CEVuD Vulnerability Gate
-
-on:
-  pull_request:
-    branches: [ main, master ]
-
-jobs:
-  triage-scan:
-    uses: Tayebwa-ian/CEVuD/.github/workflows/reusable_pipeline.yml@main
-    with:
-      exclude-dirs: "tests,venv,workspace_storage"
-    secrets:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+python src/triage_orchestrator.py --workspace /path/to/target --config config.json --exclude-dirs "tests,workspace_storage,src"
 ```
 
-### Option B: Local PR Scanning on this Pipeline Repository
-The pipeline repository itself runs automated scans on its own code changes using `.github/workflows/security_pipeline.yml`.
+This writes `stage1_2_triage.json` into the target workspace's artifact directory.
 
-### Configuration (Secrets)
-To enable Stage 3 analysis in CI, you must add the following GitHub Actions Secrets:
-- `OPENAI_API_KEY`: Required for GPT-4o synthesis.
-- `ANTHROPIC_API_KEY` or `GOOGLE_API_KEY`: (Optional) if using alternative providers.
+### 4. Run the remediation agent
 
-### Artifacts & Logs
-After the workflow completes:
-1.  Go to the **Actions** tab in your repository.
-2.  Select the specific workflow run.
-3.  Download the `security-triage-dossier-<SHA>` artifact.
-    - `stage1_2_triage.json`: View the SLM probability and risk scores.
-    - `remediation_dossier.md`: View the AI-generated fix (if escalated).
+If Stage 2 escalated any findings, run the agent:
 
----
+```bash
+export OPENAI_API_KEY=your-key
+python src/agent.py --workspace /path/to/target --config config.json
+```
 
-## 3. Running Unit Tests
-To run the automated pytest suite that validates AST extraction, gating calculations, and vector store relational lookups, execute:
+The agent writes a consolidated `remediation_dossier.md` when the gate decides it should run.
+
+## Docker usage
+
+The repository also ships with a Dockerfile that builds a runtime image with the Python environment, Semgrep, and the model assets. The CI workflows mount the target workspace into the container and run the same scripts as above.
+
+## GitHub Actions
+
+The repository includes two workflows:
+
+- [.github/workflows/security_pipeline.yml](.github/workflows/security_pipeline.yml): scans the current repository on push or pull request.
+- [.github/workflows/reusable_pipeline.yml](.github/workflows/reusable_pipeline.yml): can be called from another repository to scan a target codebase.
+
+To enable Stage 3 in CI, provide the relevant secrets for your provider, for example:
+
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `GOOGLE_API_KEY`
+- `UNIPASSAU_API_KEY`
+
+After the workflow completes, inspect the uploaded artifact under `workspace_storage/artifacts/run_<sha>/`.
+
+## Testing
+
+Run the unit tests:
+
 ```bash
 python -m pytest tests/
 ```
 
----
+## Benchmarking
 
-## 4. Benchmarking & Evaluation
-To measure the **Recall** and **Token Reduction Rate (TRR)** without running a full pipeline:
-1. Seed the benchmark data:
-    ```bash
-    python src/dataset_ingest.py --mode benchmark --file tests/data/gold_standard.json
-    ```
-2. Run the evaluator:
-   ```bash
-   python src/evaluate_pipeline.py
-   ```
+To evaluate the pipeline over the bundled gold-standard data:
+
+```bash
+python src/dataset_ingest.py --mode benchmark --file tests/data/gold_standard.json
+python src/evaluate_pipeline.py
+```

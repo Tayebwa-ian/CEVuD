@@ -3,10 +3,12 @@
 import json
 import os
 import torch
-from transformers import AutoTokenizer, AutoModel
+from typing import List, Dict, Any, Optional
 from deepagents import create_deep_agent
 from llm_factory import LLMFactory
 from vector_store import LocalVectorStore
+from model_manager import ModelManager  # ✅ Centralized model access
+
 
 class DeepAppSecAgent:
     """
@@ -14,6 +16,13 @@ class DeepAppSecAgent:
     This class handles the most expensive part of the pipeline: using a frontier LLM
     to perform deep task decomposition, cross-file data flow tracing, and remediation 
     generation for high-risk flaws escalated by the Stage 2 gating loop.
+
+    Optimizations:
+    - Uses ModelManager singleton to avoid redundant model loads.
+    - Caches CodeBERT embeddings per function_name to avoid recomputation.
+    - Caches hybrid context lookups (graph + semantic) per function_name.
+    - Robust error handling for LLM/tool failures.
+    - Clean, deterministic prompt engineering for consistent output.
     """
 
     def __init__(self, config_path: str, workspace_path: str = None):
@@ -54,34 +63,49 @@ class DeepAppSecAgent:
         # Establish deterministic artifact delivery coordinates
         self.artifact_dir = os.path.join(effective_ws_root, self.config["paths"]["artifacts_subdir"], self.run_id)
         os.makedirs(self.artifact_dir, exist_ok=True)
-        
-        # Initialize semantic feature extractor engine weights (CodeBERT-base implementation)
-        self.model_name = "microsoft/codebert-base"
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.model = AutoModel.from_pretrained(self.model_name)
-        self.model.eval() # Prevent dropout adjustments during feature inference pipelines
 
-    def _generate_mean_pooled_embedding(self, text: str) -> list:
+        # ✅ Use singleton ModelManager for embeddings — no duplicate loads
+        self.model_manager = ModelManager()
+        self.embedding_tokenizer, self.embedding_model = self.model_manager.get_embedding_model()
+
+        # ✅ In-memory cache for embeddings and context lookups (per run)
+        self._embedding_cache: Dict[str, List[float]] = {}
+        self._context_cache: Dict[str, str] = {}
+
+    def _generate_mean_pooled_embedding(self, text: str) -> List[float]:
         """
         Generates standard mean-pooled hidden-state vectors from CodeBERT.
-        This provides a dense 768-dimensional signature consistent across components.
+        Uses cached results to avoid recomputing embeddings for the same text.
 
         Args:
             text (str): Source text or symbol identifier to vectorize.
 
         Returns:
-            list: A 768-dimensional list of floating-point numbers.
+            List[float]: A 768-dimensional list of floating-point numbers.
         """
-        inputs = self.tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
+        if text in self._embedding_cache:
+            return self._embedding_cache[text]
+
+        inputs = self.embedding_tokenizer(
+            text, 
+            return_tensors="pt", 
+            truncation=True, 
+            padding=True, 
+            max_length=512
+        )
         with torch.no_grad():
-            outputs = self.model(**inputs)
-            # Apply mean-pooling matrix compression safely across temporal tensor distributions
-            return outputs.last_hidden_state.mean(dim=1).squeeze().tolist()
+            outputs = self.embedding_model(**inputs)
+            # Apply mean-pooling across temporal dimension
+            embedding = outputs.last_hidden_state.mean(dim=1).squeeze().tolist()
+
+        self._embedding_cache[text] = embedding
+        return embedding
 
     def _get_context_tool(self, function_name: str) -> str:
         """
         Hybrid routing agent tool. Synthesizes explicit structural dependency lines 
         with standard text vector searches to trace data lineage across file paths.
+        Uses caching to avoid repeated queries for the same function_name.
 
         Args:
             function_name (str): The name of the function/symbol to trace across files.
@@ -89,29 +113,43 @@ class DeepAppSecAgent:
         Returns:
             str: A formatted string containing call-graph and semantic context blocks.
         """
+        if function_name in self._context_cache:
+            return self._context_cache[function_name]
+
         context_str = "--- Hybrid Codebase Lineage Trace ---\n"
         
         # Method A: Core Static Lineage Lookups using graph links
-        structural_flow = self.vector_store.get_explicit_flow_context(function_name)
-        if structural_flow:
-            context_str += "[Graph Match Results - Explicit Upstream/Downstream Calls]\n"
-            for node in structural_flow:
-                context_str += f"[{node['relationship']}] File: {node['file_path']} | Function: {node['function_name']}\n"
-                context_str += f"Code:\n{node['source_code']}\n--------------------\n"
-        
-        # Method B: Semantic Neighborhood Evaluation (CodeBERT Vector Matching)
-        query_vector = self._generate_mean_pooled_embedding(function_name)
-        semantic_matches = self.vector_store.query_cross_file_context(query_vector, limit=2)
-        
-        if semantic_matches:
-            context_str += "\n[Semantic Proximity Matches - Relevant Shared Variables/Types]\n"
-            for item in semantic_matches:
-                context_str += f"File: {item['file_path']} | Function: {item['function_name']} (Similarity: {item['similarity']:.3f})\n"
-                context_str += f"Code:\n{item['source_code']}\n--------------------\n"
+        try:
+            structural_flow = self.vector_store.get_explicit_flow_context(function_name)
+            if structural_flow:
+                context_str += "[Graph Match Results - Explicit Upstream/Downstream Calls]\n"
+                for node in structural_flow:
+                    context_str += f"[{node['relationship']}] File: {node['file_path']} | Function: {node['function_name']}\n"
+                    context_str += f"Code:\n{node['source_code']}\n--------------------\n"
+        except Exception as e:
+            context_str += f"[⚠️ Graph Lookup Error] {str(e)}\n"
 
-        if not structural_flow and not semantic_matches:
-            return f"No cross-file lineage connections found for target symbol identifier: '{function_name}'"
+        # Method B: Semantic Neighborhood Evaluation (CodeBERT Vector Matching)
+        try:
+            query_vector = self._generate_mean_pooled_embedding(function_name)
+            semantic_matches = self.vector_store.query_cross_file_context(query_vector, limit=2)
             
+            if semantic_matches:
+                context_str += "\n[Semantic Proximity Matches - Relevant Shared Variables/Types]\n"
+                for item in semantic_matches:
+                    context_str += f"File: {item['file_path']} | Function: {item['function_name']} (Similarity: {item['similarity']:.3f})\n"
+                    context_str += f"Code:\n{item['source_code']}\n--------------------\n"
+        except Exception as e:
+            context_str += f"[⚠️ Semantic Lookup Error] {str(e)}\n"
+
+        if not any([
+            any("Graph Match Results" in line for line in context_str.splitlines()),
+            any("Semantic Proximity Matches" in line for line in context_str.splitlines())
+        ]):
+            context_str += f"No cross-file lineage connections found for target symbol identifier: '{function_name}'"
+
+        # Cache result for future use
+        self._context_cache[function_name] = context_str
         return context_str
 
     def execute_deep_analysis(self) -> None:
@@ -135,48 +173,76 @@ class DeepAppSecAgent:
             
         # Isolate entries flagged for human or autonomous code generation review
         escalated_findings = [f for f in triage_data.get("findings", []) if f.get("escalate")]
+        if not escalated_findings:
+            print("[+] No findings marked for escalation. Skipping LLM analysis.")
+            return
+
         print(f"[*] Escalating {len(escalated_findings)} high-risk findings to DeepAgent engine blocks...")
 
         # Initialize the underlying frontier reasoning model
-        llm_cfg = self.config["stage3_llm"]
-        base_model = LLMFactory.get_model(
-            provider=llm_cfg["provider"],
-            model_name=llm_cfg["model_name"],
-            temperature=llm_cfg["temperature"]
-        )
+        llm_cfg = self.config.get("stage3_llm", {})
+        if not llm_cfg:
+            raise ValueError("Missing 'stage3_llm' configuration in config.json")
+
+        try:
+            base_model = LLMFactory.get_model(
+                provider=llm_cfg.get("provider", "openai"),
+                model_name=llm_cfg.get("model_name", "gpt-4o"),
+                temperature=llm_cfg.get("temperature", 0.1)
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize LLM model: {str(e)}")
 
         # Define an explicit wrapper function to ensure clean tool signatures for the agent framework
         def context_tracing_tool(function_name: str) -> str:
             """Queries the local codebase call-graph data structures and vector context spaces."""
-            return self._get_context_tool(function_name)
+            if not isinstance(function_name, str) or not function_name.strip():
+                return "[ERROR] Invalid function name provided to context_tracing_tool."
+            return self._get_context_tool(function_name.strip())
 
         # Initialize the advanced task-breaking agent harness
         print("[*] Instantiating DeepAgent workspace environment...")
-        security_agent = create_deep_agent(
-            model=base_model,
-            tools=[context_tracing_tool], # Pass clean explicit function reference wrapper
-            system_prompt=(
-                "You are an elite Application Security Vulnerability Engineer. "
-                "Your objective is to systematically review a list of high-risk code findings, "
-                "plan your analysis to cover all of them, break down the structural interaction paths "
-                "into explicit tasks, and consolidate your findings into a single, comprehensive "
-                "Remediation Dossier. For each finding, include sections for 'Vulnerability Analysis', "
-                "'Source/Sink Lineage', 'Exploit PoC Steps', and 'Remediation Patch'. "
-                "Use your tools to query code context for function/symbol names to determine cross-file issues."
+        try:
+            security_agent = create_deep_agent(
+                model=base_model,
+                tools=[context_tracing_tool],  # Pass clean explicit function reference wrapper
+                system_prompt=(
+                    "You are an elite Application Security Vulnerability Engineer. "
+                    "Your objective is to systematically review a list of high-risk code findings, "
+                    "plan your analysis to cover all of them, break down the structural interaction paths "
+                    "into explicit tasks, and consolidate your findings into a single, comprehensive "
+                    "Remediation Dossier. For each finding, include sections for 'Vulnerability Analysis', "
+                    "'Source/Sink Lineage', 'Exploit Proof-of-Concept Steps', and 'Remediation Patch'. "
+                    "Use your tools to query code context for function/symbol names to determine cross-file issues. "
+                    "DO NOT generate placeholder text. If context is missing, state it clearly. "
+                    "Output MUST be valid Markdown with exactly four sections per finding."
+                )
             )
-        )
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize DeepAgent: {str(e)}")
 
         # Structure the payload string block cleanly
         findings_input = ""
         for idx, finding in enumerate(escalated_findings):
             # Extract target name safely with clean string fallbacks
-            func_name = finding.get("function_name", "unknown_symbol")
-            
+            func_name = finding.get("function_name", "unknown_symbol").strip()
+            file_path = finding.get("evaluated_file", "unknown_file").strip()
+            snippet = finding.get("code_snippet", "").strip()
+            risk_score = finding.get("metrics", {}).get("calculated_combined_risk", 0.0)
+
+            if not func_name or not file_path:
+                print(f"[!] Skipping malformed finding at index {idx}")
+                continue
+
             findings_input += f"### Finding {idx+1}:\n"
-            findings_input += f"Target Function: {func_name}\n" # 🎯 FIX: explicitly pass this so the LLM knows what tool query strings to request
-            findings_input += f"File location: {finding['evaluated_file']}\n"
-            findings_input += f"Isolated Code Snippet:\n```python\n{finding['code_snippet']}\n```\n"
-            findings_input += f"Calculated Combined Risk Index: {finding['metrics']['calculated_combined_risk']:.3f}\n\n"
+            findings_input += f"Target Function: {func_name}\n"
+            findings_input += f"File location: {file_path}\n"
+            findings_input += f"Isolated Code Snippet:\n```python\n{snippet}\n```\n"
+            findings_input += f"Calculated Combined Risk Index: {risk_score:.3f}\n\n"
+
+        if not findings_input.strip():
+            print("[!] No valid findings to analyze. Skipping LLM generation.")
+            return
 
         execution_query = {
             "messages": (
@@ -189,15 +255,29 @@ class DeepAppSecAgent:
         }
 
         # Dispatch execution task loop to the reasoning agent
-        response = security_agent.invoke(execution_query)
-        final_dossier = response["messages"][-1].content
+        try:
+            print("[*] Invoking DeepAgent for remediation synthesis...")
+            response = security_agent.invoke(execution_query)
+            final_dossier = response["messages"][-1].content
+        except Exception as e:
+            final_dossier = (
+                "# 🚨 Remediation Dossier Generation Failed\n\n"
+                f"## Error\n\n"
+                f"DeepAgent failed to generate output: `{str(e)}`\n\n"
+                f"## Action Required\n\n"
+                f"Check LLM API key, network connectivity, or model availability.\n"
+            )
+            print(f"[!] DeepAgent invocation failed: {str(e)}")
 
         # Save the structured remediation portfolio down to persistent file disk mounts
         report_path = os.path.join(self.artifact_dir, "remediation_dossier.md")
-        with open(report_path, "w", encoding="utf-8") as out:
-            out.write(final_dossier)
-
-        print(f"[+] Consolidated remediation dossier archived securely inside: {report_path}")
+        try:
+            with open(report_path, "w", encoding="utf-8") as out:
+                out.write(final_dossier)
+            print(f"[+] Consolidated remediation dossier archived securely inside: {report_path}")
+        except Exception as e:
+            print(f"[!] Failed to write remediation dossier: {str(e)}")
+            raise
 
 if __name__ == "__main__":
     import argparse

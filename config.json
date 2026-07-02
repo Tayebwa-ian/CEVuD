@@ -20,8 +20,8 @@
     "INFO": 0.3
   },
   "stage3_llm": {
-    "provider": "openai",
-    "model_name": "gpt-4o",
-    "temperature": 0.0
+    "provider": "unipassau",
+    "model_name": "qwen3-next-80b-a3b-instruct",
+    "temperature": 0.1
   }
 }

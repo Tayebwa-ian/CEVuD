@@ -1,82 +1,102 @@
 # CEVuD: Cost-Effective Vulnerability Detection
 
-CEVuD is a multi-stage security orchestration pipeline designed to identify vulnerabilities in Python codebases. It balances depth and cost by using a "Gated Logic" approach—only escalating findings to high-reasoning LLMs when local analysis confirms a high probability of risk.
+CEVuD is a Python-based security triage pipeline that combines static analysis, local semantic scoring, and optional LLM-based remediation synthesis. The repository is designed for cost-aware code review workflows where only the highest-risk findings are escalated to a frontier model.
 
-## 🚀 Pipeline Workflow
+## What the pipeline does
 
-1.  **Stage 1: Static Taint Analysis (Semgrep)**
-    *   Scans the `git diff` using **standard Registry rules** and **custom Taint rules**.
-    *   Traces untrusted **Sources** (API inputs, CLI args) to dangerous **Sinks** (SQL, Shell, Filesystem).
-    *   Assigns a severity weight ($S_{sev}$).
+1. Stage 1: static analysis with Semgrep
+   - Runs Semgrep with the default Python ruleset plus the repository's custom taint rules.
+   - Produces a JSON findings file that records file locations and severity labels.
 
-2.  **Stage 2: Semantic Gating (Local SLM)**
-    * Modified functions are extracted via AST.
-    * A local CodeBERT model evaluates the threat probability ($P_{slm}$).
-    * **Risk Formula:** $R = (0.4 \cdot S_{sev}) + (0.6 \cdot P_{slm})$.
-    * **Escalation:** Triggered if $R \ge 0.52$ OR if either the static severity is critical ($1.0$) or the SLM probability is very high ($> 0.9$).
+2. Stage 2: local triage and gating
+   - Extracts complete function-level code blocks from the target workspace using Python AST parsing.
+   - Runs a local CodeBERT-based classifier to estimate the probability that a snippet is a security vulnerability.
+   - Combines Semgrep severity and SLM probability with the configured weighted formula:
+     - $R = (W_1 \cdot S_{sev}) + (W_2 \cdot P_{slm})$
+   - Escalates when the score meets the threshold, when a critical static severity is found, or when the SLM score crosses the override boundary.
 
-3.  **Stage 3: Deep Synthesis (DeepAgent)**
-    *   A frontier LLM performs task decomposition to trace data lineage.
-    *   Queries the **Local Vector Store** (SQLite) for cross-file context for *all* escalated findings.
-    *   Generates a *single, consolidated* `remediation_dossier.md` with PoC steps and patches for all high-risk items.
+3. Stage 3: optional remediation synthesis
+   - Reads the Stage 2 triage report and, if escalation is triggered, passes the flagged findings to a DeepAgent-style LLM workflow.
+   - Uses a local vector store for cross-file context and writes a consolidated remediation dossier.
 
-## 🔍 Detection Capabilities
-- **Injection:** SQLi, Command Injection (RCE), and SSRF.
-- **Data Safety:** Unsafe Deserialization (Pickle/YAML) and Cryptographic Failures (Weak Hashing).
-- **Web Security:** Reflected XSS and Path Traversal.
-- **Access Control:** Insecure Direct Object Reference (IDOR).
-- **Secrets:** Hardcoded credentials and API tokens.
+## Repository layout
 
-## 🛠️ Tech Stack
+- [src/triage_orchestrator.py](src/triage_orchestrator.py): orchestrates Stage 2, extracts code snippets, and writes the triage ledger.
+- [src/agent.py](src/agent.py): runs the Stage 3 reasoning loop and writes the remediation report.
+- [src/dataset_ingest.py](src/dataset_ingest.py): seeds the vector store from benchmark data or a repository crawl.
+- [src/evaluate_pipeline.py](src/evaluate_pipeline.py): runs the benchmark harness against the gold-standard cases.
+- [src/model_manager.py](src/model_manager.py): centralizes loading of the local classifier and embedding model.
+- [src/vector_store.py](src/vector_store.py): stores function-level code blocks and embeddings in SQLite.
+- [src/llm_factory.py](src/llm_factory.py): provides the LLM provider abstraction used by the agent.
+- [tests/](tests/): regression tests for parsing, gating, ingest, vector store access, and the end-to-end pipeline.
+- [.github/workflows/](.github/workflows/): CI workflows for the repository-local pipeline and the reusable external-repo workflow.
+- [Dockerfile](Dockerfile): builds a runtime image with Semgrep, application code, and the local model assets.
 
-- **Core:** Python 3.14.6
-- **Static Engine:** Semgrep OSS (Taint Mode)
-- **ML Models:** CodeBERT (Classification & Embeddings)
-- **Context Store:** SQLite with binary vector blobs
-- **Reasoning:** `deepagents` (Task-driven LLM orchestration)
+## Quick start
 
-## 📂 Project Structure
+### 1. Install dependencies
 
-- `src/diff_parser.py`: Decoupled AST-based code extraction from git diffs with custom exclusions.
-- `src/triage_orchestrator.py`: Mathematical gating logic accepting dynamic target workspaces.
-- `src/vector_store.py`: Persistent database client supporting dynamic workspace lookup and embeddings.
-- `src/agent.py`: Advanced agent runtime executing relative to targeted workspaces.
-- `src/evaluate_pipeline.py`: Benchmark runner.
-- `tests/`: Suite containing unit tests for AST parser, database store, and gating calculations.
+```bash
+pip install -r requirements.txt
+pip install semgrep
+```
 
-## ⚙️ Quick Start
+### 2. Seed the local context store
 
-### 1. Run Unit Tests
-To verify all pipeline logic works correctly:
+For benchmark mode:
+
+```bash
+python src/dataset_ingest.py --mode benchmark --file tests/data/gold_standard.json
+```
+
+For repository mode:
+
+```bash
+python src/dataset_ingest.py --mode repo --path /path/to/target/code
+```
+
+### 3. Run Stage 1: static scan
+
+```bash
+semgrep --config p/python --config ./semgrep_rules/custom_appsec_rules.yaml --no-git-ignore --exclude tests --exclude workspace_storage --json --output /path/to/target/semgrep_results.json /path/to/target
+```
+
+### 4. Run Stage 2: local triage and gating
+
+```bash
+python src/triage_orchestrator.py --workspace /path/to/target --config config.json --exclude-dirs "tests,workspace_storage,src"
+```
+
+This writes a file named `stage1_2_triage.json` under the target workspace's artifact directory.
+
+### 5. Run Stage 3: remediation synthesis
+
+```bash
+export OPENAI_API_KEY=your-key
+python src/agent.py --workspace /path/to/target --config config.json
+```
+
+The agent writes a consolidated `remediation_dossier.md` when Stage 2 decides that escalation is required.
+
+## Configuration
+
+The default gate settings are defined in [config.json](config.json):
+
+- Static weight: `0.4`
+- SLM weight: `0.6`
+- Escalation threshold: `0.52`
+- SLM override threshold: `0.90`
+
+The runtime expects a workspace that contains the output files from the static scan and a writable artifact directory under `workspace_storage/artifacts/`.
+
+## Evaluation and tests
+
+Run the unit tests:
+
 ```bash
 python -m pytest tests/
 ```
 
-### 2. Scanning a Target Repository
-You can run the pipeline on an external codebase:
-```bash
-# 1. Generate static analysis findings in the target repo
-semgrep --config p/python --config ./semgrep_rules/custom_appsec_rules.yaml --json --output /path/to/target/semgrep_results.json /path/to/target
+## CI/CD usage
 
-# 2. Run Stage 2 Triage with custom exclusions and target workspace
-python src/triage_orchestrator.py --workspace /path/to/target --exclude-dirs "tests,workspace_storage"
-
-# 3. Run Stage 3 Deep Synthesis Agent
-python src/agent.py --workspace /path/to/target
-```
-
-### 3. CI/CD Integration (Option A: Reusable Workflow)
-Other codebases can scan their PRs using this central pipeline via the reusable workflow:
-```yaml
-jobs:
-  scan:
-    uses: Tayebwa-ian/CEVuD/.github/workflows/reusable_pipeline.yml@main
-    with:
-      exclude-dirs: "tests,workspace_storage"
-    secrets:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-```
-
-## 🛠️ Roadmap
-- [ ] **CLI Packaging:** Transition to a `pip`-installable package with a `cevud` entry point.
-- [ ] **Multi-File Taint:** Enhance SLM fallback to trace variables across multiple function imports.
+The repository includes reusable GitHub Actions workflows for local PR scanning and external-repo scanning. The workflows run the same three stages in Docker and upload the generated artefacts under `workspace_storage/artifacts/run_<sha>/`.

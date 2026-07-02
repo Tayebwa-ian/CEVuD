@@ -1,0 +1,270 @@
+{
+  "run_id": "run_local-dev-run",
+  "gate_decision": {
+    "escalate_to_llm": true,
+    "gating_threshold_applied": 0.52
+  },
+  "findings": [
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_10_read_user_file.py",
+      "code_snippet": "def read_user_file(request):\n    # VULNERABLE: Path Traversal\n    import os\n    filename = request.args.get('file')\n    filepath = os.path.join(\"/var/www/uploads\", filename)\n    with open(filepath, 'r') as f:\n        return f.read()\n",
+      "metrics": {
+        "semgrep_severity_score": 0.7,
+        "slm_threat_probability": 0.579,
+        "calculated_combined_risk": 0.6274
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_11_read_user_file_safe.py",
+      "code_snippet": "def read_user_file_safe(request):\n    # SECURE: Use abspath and check prefix\n    import os\n    base_dir = \"/var/www/uploads\"\n    filename = request.args.get('file')\n    filepath = os.path.abspath(os.path.join(base_dir, filename))\n    if not filepath.startswith(os.path.abspath(base_dir)):\n        return \"Access Denied\", 403\n    with open(filepath, 'r') as f:\n        return f.read()\n",
+      "metrics": {
+        "semgrep_severity_score": 0.7,
+        "slm_threat_probability": 0.0874,
+        "calculated_combined_risk": 0.3324
+      },
+      "escalate": false
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_12_get_user_data.py",
+      "code_snippet": "def get_user_data(request, db):\n    # VULNERABLE: IDOR - No ownership check\n    user_id = request.args.get('id')\n    return db.query(\"SELECT * FROM users WHERE id = ?\", (user_id,)).fetchone()\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.8979,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_13_get_user_data_safe.py",
+      "code_snippet": "def get_user_data_safe(request, db, current_user):\n    # SECURE: ownership check enforced\n    user_id = request.args.get('id')\n    if user_id != current_user.id:\n        return \"Unauthorized\", 403\n    return db.query(\"SELECT * FROM users WHERE id = ?\", (user_id,)).fetchone()\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.5889,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_14_hash_password.py",
+      "code_snippet": "def hash_password(password):\n    # VULNERABLE: Use of weak MD5 hash\n    import hashlib\n    return hashlib.md5(password.encode()).hexdigest()\n",
+      "metrics": {
+        "semgrep_severity_score": 0.7,
+        "slm_threat_probability": 0.0274,
+        "calculated_combined_risk": 0.2964
+      },
+      "escalate": false
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_14_hash_password.py",
+      "code_snippet": "def hash_password(password):\n    # VULNERABLE: Use of weak MD5 hash\n    import hashlib\n    return hashlib.md5(password.encode()).hexdigest()\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.0274,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_14_hash_password.py",
+      "code_snippet": "def hash_password(password):\n    # VULNERABLE: Use of weak MD5 hash\n    import hashlib\n    return hashlib.md5(password.encode()).hexdigest()\n",
+      "metrics": {
+        "semgrep_severity_score": 0.7,
+        "slm_threat_probability": 0.0274,
+        "calculated_combined_risk": 0.2964
+      },
+      "escalate": false
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_16_redirect_to_next.py",
+      "code_snippet": "def redirect_to_next(request):\n    # VULNERABLE: Open Redirect\n    from flask import redirect\n    target = request.args.get('next')\n    return redirect(target)\n",
+      "metrics": {
+        "semgrep_severity_score": 0.7,
+        "slm_threat_probability": 0.7289,
+        "calculated_combined_risk": 0.7173
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_17_redirect_to_next_safe.py",
+      "code_snippet": "def redirect_to_next_safe(request):\n    # SECURE: Validate redirect target domain\n    from flask import redirect, url_for\n    target = request.args.get('next')\n    if target.startswith('/'):\n        return redirect(target)\n    return redirect(url_for('index'))\n",
+      "metrics": {
+        "semgrep_severity_score": 0.7,
+        "slm_threat_probability": 0.0751,
+        "calculated_combined_risk": 0.3251
+      },
+      "escalate": false
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_18_log_event.py",
+      "code_snippet": "def log_event(request):\n    # VULNERABLE: Log Injection\n    import logging\n    user_input = request.args.get('data')\n    logging.info(f\"User input received: {user_input}\")\n",
+      "metrics": {
+        "semgrep_severity_score": 0.3,
+        "slm_threat_probability": 0.6246,
+        "calculated_combined_risk": 0.4948
+      },
+      "escalate": false
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_19_log_event_safe.py",
+      "code_snippet": "def log_event_safe(request):\n    # SECURE: Sanitize input for logs to prevent CRLF injection\n    import logging\n    user_input = request.args.get('data').replace('\\n', '').replace('\\r', '')\n    logging.info(f\"User input received: {user_input}\")\n",
+      "metrics": {
+        "semgrep_severity_score": 0.3,
+        "slm_threat_probability": 0.0627,
+        "calculated_combined_risk": 0.1576
+      },
+      "escalate": false
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_20_encrypt_data.py",
+      "code_snippet": "def encrypt_data(plaintext, key):\n    # VULNERABLE: AES in unsafe ECB mode\n    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes\n    from cryptography.hazmat.backends import default_backend\n    cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())\n    encryptor = cipher.encryptor()\n    return encryptor.update(plaintext) + encryptor.finalize()\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.0168,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_21_encrypt_data_safe.py",
+      "code_snippet": "def encrypt_data_safe(plaintext, key, iv):\n    # SECURE: Using AES in safe CBC mode with unique IV\n    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes\n    from cryptography.hazmat.backends import default_backend\n    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())\n    encryptor = cipher.encryptor()\n    return encryptor.update(plaintext) + encryptor.finalize()\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.0129,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_22_extract_zip.py",
+      "code_snippet": "def extract_zip(zip_file, dest_dir):\n    # VULNERABLE: Zip Slip path traversal\n    import zipfile\n    with zipfile.ZipFile(zip_file, 'r') as zf:\n        zf.extractall(dest_dir)\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.0115,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_2_load_config.py",
+      "code_snippet": "def load_config(request):\n    # VULNERABLE: Unsafe YAML loading\n    import yaml\n    data = request.get_data()\n    return yaml.load(data)\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.8157,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_2_load_config.py",
+      "code_snippet": "def load_config(request):\n    # VULNERABLE: Unsafe YAML loading\n    import yaml\n    data = request.get_data()\n    return yaml.load(data)\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.8157,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_4_proxy_request.py",
+      "code_snippet": "def proxy_request(request):\n    # VULNERABLE: SSRF - direct use of user-supplied URL\n    import requests\n    target_url = request.args.get('url')\n    return requests.get(target_url).text\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.8467,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_4_proxy_request.py",
+      "code_snippet": "def proxy_request(request):\n    # VULNERABLE: SSRF - direct use of user-supplied URL\n    import requests\n    target_url = request.args.get('url')\n    return requests.get(target_url).text\n",
+      "metrics": {
+        "semgrep_severity_score": 0.7,
+        "slm_threat_probability": 0.8467,
+        "calculated_combined_risk": 0.788
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_5_proxy_request_safe.py",
+      "code_snippet": "def proxy_request_safe(request):\n    # SECURE: Validate URL against allowlist\n    import requests\n    ALLOWED_DOMAINS = ['api.trusted.com']\n    target_url = request.args.get('url')\n    domain = target_url.split('/')[2]\n    if domain in ALLOWED_DOMAINS:\n        return requests.get(target_url).text\n    return \"Unauthorized\", 403\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.1348,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_5_proxy_request_safe.py",
+      "code_snippet": "def proxy_request_safe(request):\n    # SECURE: Validate URL against allowlist\n    import requests\n    ALLOWED_DOMAINS = ['api.trusted.com']\n    target_url = request.args.get('url')\n    domain = target_url.split('/')[2]\n    if domain in ALLOWED_DOMAINS:\n        return requests.get(target_url).text\n    return \"Unauthorized\", 403\n",
+      "metrics": {
+        "semgrep_severity_score": 0.7,
+        "slm_threat_probability": 0.1348,
+        "calculated_combined_risk": 0.3609
+      },
+      "escalate": false
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_6_run_ping.py",
+      "code_snippet": "def run_ping(request):\n    # VULNERABLE: Command injection via shell=True\n    import subprocess\n    hostname = request.args.get('host')\n    return subprocess.check_output(f\"ping -c 1 {hostname}\", shell=True)\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.5642,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_6_run_ping.py",
+      "code_snippet": "def run_ping(request):\n    # VULNERABLE: Command injection via shell=True\n    import subprocess\n    hostname = request.args.get('host')\n    return subprocess.check_output(f\"ping -c 1 {hostname}\", shell=True)\n",
+      "metrics": {
+        "semgrep_severity_score": 0.7,
+        "slm_threat_probability": 0.5642,
+        "calculated_combined_risk": 0.6185
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_6_run_ping.py",
+      "code_snippet": "def run_ping(request):\n    # VULNERABLE: Command injection via shell=True\n    import subprocess\n    hostname = request.args.get('host')\n    return subprocess.check_output(f\"ping -c 1 {hostname}\", shell=True)\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.5642,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_6_run_ping.py",
+      "code_snippet": "def run_ping(request):\n    # VULNERABLE: Command injection via shell=True\n    import subprocess\n    hostname = request.args.get('host')\n    return subprocess.check_output(f\"ping -c 1 {hostname}\", shell=True)\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.5642,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_8_render_user_profile.py",
+      "code_snippet": "def render_user_profile(request):\n    # VULNERABLE: Reflected XSS\n    from flask import render_template_string\n    name = request.args.get('name', 'Guest')\n    return render_template_string(f\"<h1>Welcome {name}</h1>\")\n",
+      "metrics": {
+        "semgrep_severity_score": 1.0,
+        "slm_threat_probability": 0.0479,
+        "calculated_combined_risk": 1.0
+      },
+      "escalate": true
+    },
+    {
+      "evaluated_file": "/tmp/cevud_bench_jgkym3s5/case_8_render_user_profile.py",
+      "code_snippet": "def render_user_profile(request):\n    # VULNERABLE: Reflected XSS\n    from flask import render_template_string\n    name = request.args.get('name', 'Guest')\n    return render_template_string(f\"<h1>Welcome {name}</h1>\")\n",
+      "metrics": {
+        "semgrep_severity_score": 0.7,
+        "slm_threat_probability": 0.0479,
+        "calculated_combined_risk": 0.3087
+      },
+      "escalate": false
+    }
+  ],
+  "status": "VULNERABLE"
+}

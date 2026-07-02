@@ -4,7 +4,9 @@ import ast
 import shutil
 import torch
 import os
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from typing import List, Dict, Any
+from model_manager import ModelManager
+from vector_store import LocalVectorStore
 
 class TriageOrchestrator:
     """
@@ -22,52 +24,52 @@ class TriageOrchestrator:
             config_path (str): File system path to the main test manifest configuration.
             workspace_path (str, optional): Target directory path of the codebase under analysis.
         """
+        # Set environment variable for ModelManager to locate config
+        os.environ["CEVUD_CONFIG_PATH"] = os.path.abspath(config_path)
+        self._config_path = os.path.abspath(config_path)
         with open(config_path, "r") as f:
             self.config = json.load(f)
 
         # Establish base root context coordinates
         self.workspace_path = workspace_path or self.config["paths"].get("workspace_root", ".")
-        self.artifact_dir = os.path.join(self.workspace_path, self.config["paths"]["artifacts_subdir"], "run_local-dev-run")
+        run_id = os.getenv("GITHUB_RUN_ID") or os.getenv("GITHUB_SHA") or "local-dev-run"
+        
+        if not run_id.startswith("run_"):
+            run_id = f"run_{run_id}"
+
+        self.artifact_dir = os.path.join(
+            self.workspace_path,
+            self.config["paths"]["artifacts_subdir"],
+            run_id
+        )
 
         # Model cache directory for transformers to avoid repeated downloads
         cache_sub = self.config["paths"].get("model_cache_dir", "workspace_storage/model_cache")
         self.local_cache_path = os.path.abspath(os.path.join(self.workspace_path, cache_sub))
         os.makedirs(self.local_cache_path, exist_ok=True)
 
-        # Initialize the target sequence classifier model checkpoint
-        self.model_name = "jayansh21/codesheriff-bug-classifier"
-        print(f"[*] Initializing Security SLM Classifier: {self.model_name}")
-        # 💾 ENFORCE LOCAL CACHE ON INITIAL LOAD
-        # The first run downloads the model weights to disk; subsequent runs reuse them instantly.
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_name, 
-            cache_dir=self.local_cache_path
-        )
-        self.model = AutoModelForSequenceClassification.from_pretrained(
-            self.model_name, 
-            cache_dir=self.local_cache_path
-        )
+        # Initialize ModelManager — no model loaded yet, it's lazy-loaded on first use
+        self.model_manager = ModelManager()
+
+        print(f"[*] TriageOrchestrator initialized. Model will load on first inference.")
 
     def extract_source_snippet(self, file_path: str, start_line: int, end_line: int) -> str:
         """
         Parses a physical source file into an Abstract Syntax Tree (AST) to identify
         and extract the complete, unbroken function block containing the matched lines.
-        
-        Ensures input context parity with the evaluation pipeline.
-
-        Args:
-            file_path (str): Relative or absolute target file path to parse.
-            start_line (int): The starting line pointer from Semgrep (1-indexed).
-            end_line (int): The ending line pointer from Semgrep (1-indexed).
-
-        Returns:
-            str: Clean, complete function string block starting at 'def ' and ending at scope close.
+        Includes a path-resilience fallback mechanism for staging environments.
         """
+        # Try resolving via standard rules first
         resolved_path = file_path if os.path.isabs(file_path) else os.path.join(self.workspace_path, file_path)
         
+        # SENIOR ARCHITECTURE FIX: Fallback lookup for shifting temporary execution directories
         if not os.path.exists(resolved_path):
-            print(f"[!] Warning: Source file missing during extraction: {resolved_path}")
-            return ""
+            fallback_path = os.path.join(self.workspace_path, os.path.basename(file_path))
+            if os.path.exists(fallback_path):
+                resolved_path = fallback_path
+            else:
+                print(f"[!] Warning: Source file missing during extraction: {resolved_path}")
+                return ""
 
         try:
             with open(resolved_path, "r", encoding="utf-8") as source_file:
@@ -76,30 +78,21 @@ class TriageOrchestrator:
 
             # Build the Abstract Syntax Tree from the target file source
             tree = ast.parse(source_code, filename=resolved_path)
-            
             target_function_node = None
             
             # Walk through all nodes inside the syntax tree structure
             for node in ast.walk(tree):
-                # Target both standard functions and async class/module methods
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    # Check if Semgrep's match line sits securely inside this function's block limits
-                    # Note: node.end_lineno is supported natively in Python 3.8+
                     if node.lineno <= start_line <= node.end_lineno:
                         target_function_node = node
-                        break # Exact matching functional scope located
+                        break
 
-            # If a valid function envelope is found, slice the exact node layout lines
             if target_function_node:
-                # AST line offsets are 1-indexed; convert to 0-indexed slice bounds
                 slice_start = target_function_node.lineno - 1
                 slice_end = target_function_node.end_lineno
-                
-                # Reconstruct the pristine functional unit block string
                 pristine_function = "\n".join(file_lines[slice_start:slice_end])
                 return pristine_function.strip()
                 
-            # Fallback: If the finding is at a module level (outside a function), slice standard boundaries
             print(f"[*] Match line {start_line} outside function scope. Falling back to line slice.")
             slice_start = max(0, start_line - 1)
             slice_end = min(len(file_lines), end_line)
@@ -109,41 +102,25 @@ class TriageOrchestrator:
             print(f"[!] AST parsing or slice exception on target asset file: {err}")
             return ""
 
-    def slm_inference(self, code_snippet: str) -> float:
+    def slm_inference_batch(self, code_snippets: List[str]) -> List[float]:
         """
-        Executes independent local forward-pass tokenization and inference 
-        over raw text data to map real threat probabilities.
+        Performs batched inference on multiple code snippets using the fine-tuned SLM.
+        This is the optimized version that replaces the slow per-snippet inference.
 
         Args:
-            code_snippet (str): Pristine code snippet source context string.
+            code_snippets (List[str]): List of clean, complete function source code strings.
 
         Returns:
-            float: Distributed risk scale soft probability bound ranging between [0.0, 1.0].
+            List[float]: List of risk probabilities (0.0 to 1.0) for each snippet.
         """
-        if not code_snippet.strip():
-            return 0.0
-
-        # Encode input code string matching base tokenization model thresholds
-        inputs = self.tokenizer(
-            code_snippet, 
-            return_tensors="pt", 
-            truncation=True, 
-            max_length=512
-        )
-        
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-            # Map raw logits to a soft probability distribution curve via spatial softmax activation
-            probabilities = torch.softmax(outputs.logits, dim=1).flatten()
-            
-        # Target Index 1 returns the explicit positive class continuous scalar distribution
-        return round(probabilities[1].item(), 4)
+        probabilities = self.model_manager.get_classifier_inference(code_snippets)
+        return [round(p, 4) for p in probabilities]
 
     def evaluate_gate(self, semgrep_severity: str, slm_score: float) -> dict:
         """
         Combines isolated static and neural telemetry signals into a composite risk score matrix.
         
-        🎯 SHORT-CIRCUIT AMENDMENT:
+        SHORT-CIRCUIT AMENDMENT:
         Implements an asymmetric risk override. If the static analyzer flags a catastrophic 
         severity flaw (score == 1.0) OR the neural classifier exhibits extreme confidence 
         (probability > 0.9), the system forces an absolute escalation override to bypass 
@@ -158,9 +135,11 @@ class TriageOrchestrator:
             dict: Structured results matching pipeline schema requirements.
         """
         # Map configured weightings from the environment manifest config
-        severity_weight = self.config["semgrep_severity_map"].get(semgrep_severity, 0.0)
+        severity_map = self.config.get("semgrep_severity_map", {})
+        severity_weight = severity_map.get(semgrep_severity, 0.0)
         w1 = self.config["gate_parameters"]["weight_static"]
         w2 = self.config["gate_parameters"]["weight_slm"]
+    
         
         # Calculate standard continuous risk boundary parameters
         risk_score = (w1 * severity_weight) + (w2 * slm_score)
@@ -169,11 +148,12 @@ class TriageOrchestrator:
         escalation_threshold = self.config["gate_parameters"]["escalation_threshold"]
         base_escalate = risk_score >= escalation_threshold
 
-        # 🚨 CRITICAL PATH: Evaluate short-circuit override conditions
+        #  Evaluate short-circuit override conditions
         # Condition A: Static severity score is absolute (1.0)
         # Condition B: SLM classification confidence breaches the 90% certainty bound
+        slm_override_threshold = self.config["gate_parameters"].get("slm_override_threshold", 0.90)
         static_override = (severity_weight >= 1.0)
-        slm_override = (slm_score > 0.9)
+        slm_override = (slm_score > slm_override_threshold)
         
         # Combine base calculations with the new non-linear safety override flags
         forced_escalation = base_escalate or static_override or slm_override
@@ -198,12 +178,22 @@ class TriageOrchestrator:
         by using Semgrep solely for file coordinates while reading code 
         blocks directly from the physical codebase. Writes out the final consolidated 
         stage1_2_triage.json dossier file.
+
+        Optimization Strategy:
+        1. Extract ALL code snippets with full context first (no model calls yet).
+        2. Run ONE batched SLM inference on all enriched snippets (massive speed gain).
+        3. Apply gating logic.
+        4. Write unified triage report.
+
+        Now: Each snippet includes:
+            - Original function code
+            - Upstream callers (functions that call this one)
+            - Downstream callees (functions this one calls)
         """
         semgrep_filename = self.config["paths"]["semgrep_output"]
         target_path = os.path.join(self.artifact_dir, semgrep_filename)
         semgrep_workspace_path = os.path.join(self.workspace_path, semgrep_filename)
 
-        # Normalize artifact locations across directories
         if not os.path.exists(semgrep_workspace_path) and os.path.exists(semgrep_filename):
             semgrep_workspace_path = semgrep_filename
 
@@ -223,22 +213,70 @@ class TriageOrchestrator:
         finding_reports = []
         overall_escalate = False
 
-        # Loop through static matches to locate and extract targets independently
+        print(f"[*] Extracting {len(findings)} code snippets with cross-file context...")
+        snippets = []
+        finding_metadata = []
+
+        #  Initialize vector store for context lookup
+        vector_store = LocalVectorStore(self._config_path, self.workspace_path)
+
         for finding in findings:
             file_target_path = finding.get("path", "")
-            
-            # Extract line boundary metrics logged by the scanner pass
             start_line = finding.get("start", {}).get("line", 1)
             end_line = finding.get("end", {}).get("line", 1)
             severity = finding.get("extra", {}).get("severity", "WARNING")
-
-            # Extract pure repository source strings instead of using semgrep snippet elements
-            snippet = self.extract_source_snippet(file_target_path, start_line, end_line)
-
-            # Pass the extracted source snippet to the neural model block independently
-            slm_score = self.slm_inference(snippet)
             
-            # Combine individual scores via triage gate mechanics
+            # Extract full function
+            function_code = self.extract_source_snippet(file_target_path, start_line, end_line)
+            if not function_code:
+                continue
+
+            # Get cross-file context — callers and callees
+            # Extract function name from function_code (simple heuristic: def name(
+            func_name = ""
+            lines = function_code.splitlines()
+            for line in lines:
+                if line.strip().startswith("def ") or line.strip().startswith("async def "):
+                    func_name = line.split("(", 1)[0].replace("def ", "").replace("async def ", "").strip()
+                    break
+
+            context_blocks = []
+            if func_name:
+                # Get explicit flow context (upstream/downstream)
+                flow_context = vector_store.get_explicit_flow_context(func_name)
+                for block in flow_context:
+                    context_blocks.append(f"\n# Context: {block['relationship']} | {block['file_path']} | {block['function_name']}\n{block['source_code']}")
+
+            #Combine function code + context
+            enriched_code = function_code + "\n" + "".join(context_blocks)
+
+            snippets.append(enriched_code)
+            finding_metadata.append({
+                "path": file_target_path,
+                "start_line": start_line,
+                "end_line": end_line,
+                "severity": severity,
+                "function_name": func_name
+            })
+
+        print(f"[*] Running batched SLM inference on {len(snippets)} enriched code snippets...")
+        slm_scores = self.slm_inference_batch(snippets)
+
+        print(f"[*] Applying risk gate logic to {len(findings)} findings...")
+        for idx, (metadata, slm_score) in enumerate(zip(finding_metadata, slm_scores)):
+            file_target_path = metadata["path"]
+            severity = metadata["severity"]
+            func_name = metadata["function_name"]
+
+            # Re-extract enriched snippet for report
+            function_code = self.extract_source_snippet(file_target_path, metadata["start_line"], metadata["end_line"])
+            context_blocks = []
+            if func_name:
+                flow_context = vector_store.get_explicit_flow_context(func_name)
+                for block in flow_context:
+                    context_blocks.append(f"\n# Context: {block['relationship']} | {block['file_path']} | {block['function_name']}\n{block['source_code']}")
+            enriched_code = function_code + "\n" + "".join(context_blocks)
+
             gate_result = self.evaluate_gate(severity, slm_score)
 
             if gate_result["escalate"]:
@@ -246,7 +284,7 @@ class TriageOrchestrator:
 
             finding_reports.append({
                 "evaluated_file": file_target_path,
-                "code_snippet": snippet,
+                "code_snippet": enriched_code,  # includes cross-file context
                 "metrics": {
                     "semgrep_severity_score": gate_result["metrics"]["static_severity_weight"],
                     "slm_threat_probability": gate_result["metrics"]["slm_probability_score"],
@@ -255,9 +293,8 @@ class TriageOrchestrator:
                 "escalate": gate_result["escalate"]
             })
 
-        # Pack and serialize the unified pipeline triage data payload safely to disk
         triage_report = {
-            "run_id": "run_local-dev-run",
+            "run_id": self.artifact_dir.split("/")[-1],  # Use dynamic run_id
             "gate_decision": {
                 "escalate_to_llm": overall_escalate,
                 "gating_threshold_applied": self.config["gate_parameters"]["escalation_threshold"]
@@ -271,3 +308,4 @@ class TriageOrchestrator:
             json.dump(triage_report, out, indent=2)
             
         print(f"[+] Successfully wrote decoupled Stage 2 triage report data to: {triage_output_path}")
+        print(f"[+] Total findings: {len(findings)}, Escalated: {sum(1 for f in finding_reports if f['escalate'])}")

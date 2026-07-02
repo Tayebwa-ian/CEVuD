@@ -45,7 +45,7 @@ def real_test_config(repository_root) -> str:
         "gate_parameters": {
             "weight_static": 0.4,
             "weight_slm": 0.6,
-            "escalation_threshold": 0.50,
+            "escalation_threshold": 0.52,
             "slm_override_threshold": 0.90
         },
         "semgrep_severity_map": {
@@ -81,11 +81,11 @@ def unit_test_config(repository_root) -> str:
         "gate_parameters": {
             "weight_static": 0.4,
             "weight_slm": 0.6,
-            "escalation_threshold": 0.5,
+            "escalation_threshold": 0.52,
             "slm_override_threshold": 0.90
         },
         "semgrep_severity_map": {
-            "ERROR": 1.0, "WARNING": 0.5, "INFO": 0.2, "NONE": 0.0
+            "ERROR": 1.0, "WARNING": 0.7, "INFO": 0.3, "NONE": 0.0
         }
     }
     with open(config_file, "w") as f:

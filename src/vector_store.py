@@ -4,11 +4,18 @@ import sqlite3
 import struct
 from typing import List, Tuple, Dict, Any
 
+
 class LocalVectorStore:
     """
     Persistent context store using SQLite. 
     Stores source code alongside binary embeddings to facilitate 
     semantic search and RAG for the Stage 3 agent.
+
+    Key Features:
+    - Stores function-level code blocks with 768-dim embeddings.
+    - Tracks upstream/downstream call relationships (call graph).
+    - Supports `file_hash` for incremental embedding (avoid re-embedding unchanged files).
+    - Enables semantic similarity search for cross-file context retrieval.
     """
 
     def __init__(self, config_path: str, workspace_path: str = None):
@@ -35,11 +42,13 @@ class LocalVectorStore:
         os.makedirs(db_dir, exist_ok=True)
         
         self.db_path = os.path.join(db_dir, "codebase_context.db")
+        self._conn = None
         self._initialize_database()
 
     def _initialize_database(self) -> None:
         """Constructs relational schema foundations with relational call-graph dimensions."""
         with sqlite3.connect(self.db_path) as conn:
+            # Create table with new `file_hash` column (backward compatible)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS codebase_embeddings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,12 +56,15 @@ class LocalVectorStore:
                     function_name TEXT NOT NULL,
                     source_code TEXT NOT NULL,
                     embedding_blob BLOB NOT NULL,
-                    calls_out TEXT,  -- JSON string array of invoked functions
-                    calls_in TEXT    -- JSON string array of dependent upstream callers
+                    calls_out TEXT,           -- JSON string array of invoked functions
+                    calls_in TEXT,            -- JSON string array of dependent upstream callers
+                    file_hash TEXT            -- ✅ SHA-256 hash of entire file content for change detection
                 );
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_file_lookup ON codebase_embeddings(file_path);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_func_lookup ON codebase_embeddings(function_name);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_file_hash ON codebase_embeddings(file_hash);")  # ✅ For fast lookups
+            conn.commit()
 
     @staticmethod
     def _serialize_vector(vector: List[float]) -> bytes:
@@ -82,19 +94,46 @@ class LocalVectorStore:
             return 0.0
         return dot_product / (norm_a * norm_b)
 
+    @property
+    def conn(self):
+        return self._get_connection()
+
+    def _get_connection(self):
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.db_path)
+            self._conn.row_factory = sqlite3.Row  # Enable dict-like access
+        return self._conn
+
     def insert_code_block(self, file_path: str, func_name: str, source: str, 
                           embedding: List[float], calls_out: List[str] = None, 
-                          calls_in: List[str] = None) -> None:
-        """Saves a code block along with its vector signature and static call arrays."""
+                          calls_in: List[str] = None, file_hash: str = "") -> None:
+        """Saves a code block along with its vector signature and static call arrays.
+
+        Args:
+            file_path (str): Relative path to the source file.
+            func_name (str): Name of the function.
+            source (str): Source code of the function.
+            embedding (List[float]): 768-dimensional embedding vector.
+            calls_out (List[str], optional): List of function names called by this function.
+            calls_in (List[str], optional): List of function names that call this function.
+            file_hash (str, optional): SHA-256 hash of the entire file content. Used for change detection.
+        """
         blob = self._serialize_vector(embedding)
         c_out = json.dumps(calls_out or [])
         c_in = json.dumps(calls_in or [])
         with sqlite3.connect(self.db_path) as conn:
+            if file_hash:
+                existing = conn.execute(
+                    "SELECT 1 FROM codebase_embeddings WHERE file_hash = ? LIMIT 1",
+                    (file_hash,)
+                ).fetchone()
+                if existing:
+                    return
             conn.execute(
                 """INSERT INTO codebase_embeddings 
-                   (file_path, function_name, source_code, embedding_blob, calls_out, calls_in) 
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (file_path, func_name, source, blob, c_out, c_in)
+                   (file_path, function_name, source_code, embedding_blob, calls_out, calls_in, file_hash) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (file_path, func_name, source, blob, c_out, c_in, file_hash)
             )
 
     def query_cross_file_context(self, query_embedding: List[float], limit: int = 2) -> List[Dict[str, Any]]:
@@ -159,3 +198,32 @@ class LocalVectorStore:
                     "relationship": "upstream-caller" if fn_name in calls_in else "downstream-sink"
                 })
         return context_nodes
+
+    def get_code_block_by_file_and_func(self, file_path: str, func_name: str) -> Dict[str, Any] | None:
+        """
+        Retrieves a specific code block from a file and function.
+        Used by dataset_ingest.py to check if a file has already been embedded and if its content has changed.
+
+        Args:
+            file_path (str): Relative path to the source file.
+            func_name (str): Specific function name.
+
+        Returns:
+            Dict[str, Any] | None: Record with file_path, function_name, source_code, file_hash, or None if not found.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT file_path, function_name, source_code, embedding_blob, file_hash FROM codebase_embeddings WHERE file_path = ? AND function_name = ?",
+                (file_path, func_name)
+            )
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "file_path": row[0],
+                    "function_name": row[1],
+                    "source_code": row[2],
+                    "source": row[2],
+                    "embedding": self._deserialize_vector(row[3]),
+                    "file_hash": row[4]
+                }
+            return None

@@ -1,0 +1,21 @@
+{
+  "confusion_matrix": {
+    "tp": 8,
+    "fp": 2,
+    "fn": 4,
+    "tn": 10
+  },
+  "metrics": {
+    "recall": 0.6667,
+    "precision": 0.8,
+    "accuracy": 0.75,
+    "f1_score": 0.7273,
+    "specificity": 0.8333,
+    "token_reduction_rate": 58.33,
+    "cost_savings_ratio": 58.33
+  },
+  "total_cases": 24,
+  "escalations": 10,
+  "eval_id": "eval_20260703_003504",
+  "timestamp": "2026-07-03T00:35:41.901642"
+}
