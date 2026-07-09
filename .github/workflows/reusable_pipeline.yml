@@ -24,6 +24,9 @@ on:
 jobs:
   security-triage:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     
     steps:
       - name: Checkout Target Codebase
@@ -75,15 +78,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute lowercase image reference
+        id: image
+        run: |
+          echo "image=ghcr.io/tayebwa-ian/cevud/appsec-pipeline" >> "$GITHUB_OUTPUT"
+
       - name: Pull Pre-Built Security Pipeline Image
         run: |
-          docker pull ghcr.io/Tayebwa-ian/CEVuD/appsec-pipeline:latest
+          docker pull ${{ steps.image.outputs.image }}:latest
 
       - name: Execute Stage 1 (Static Analysis Engine Capture)
         run: |
           docker run --rm \
             -v ${{ github.workspace }}:/workspace \
-            appsec-pipeline:latest \
+            ${{ steps.image.outputs.image }}:latest \
             -m semgrep.cli --config=p/python --config=/app/semgrep_rules/custom_appsec_rules.yaml --no-git-ignore --exclude src --exclude workspace_storage --exclude cevud-scanner --json --output=/workspace/semgrep_results.json /workspace
 
       - name: Execute Stage 2 (Local SLM Mathematical Gating)
@@ -94,7 +102,7 @@ jobs:
           docker run --rm \
             -e GITHUB_RUN_ID="run_${{ github.sha }}" \
             -v ${{ github.workspace }}:/workspace \
-            appsec-pipeline:latest \
+            ${{ steps.image.outputs.image }}:latest \
             /app/src/triage_orchestrator.py --workspace /workspace --config ${{ inputs.config-path }} --exclude-dirs "${{ inputs.exclude-dirs }},cevud-scanner"
 
       - name: Execute Stage 3 (DeepAgent Context Analysis & Synthesis)
@@ -113,7 +121,7 @@ jobs:
             -e UNIPASSAU_API_KEY \
             -e GITHUB_RUN_ID="run_${{ github.sha }}" \
             -v ${{ github.workspace }}:/workspace \
-            appsec-pipeline:latest \
+            ${{ steps.image.outputs.image }}:latest \
             /app/src/agent.py --workspace /workspace --config ${{ inputs.config-path }}
 
       - name: Move Runtime Outputs to Systematic Artifact Cache Location
