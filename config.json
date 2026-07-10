@@ -17,11 +17,20 @@
   "semgrep_severity_map": {
     "ERROR": 1.0,
     "WARNING": 0.7,
-    "INFO": 0.3
+    "INFO": 0.3,
+    "NONE": 0.0
   },
   "stage3_llm": {
     "provider": "unipassau",
     "model_name": "qwen3-next-80b-a3b-instruct",
     "temperature": 0.1
+  },
+  "evaluation": {
+    "_comment": "Settings for src/evaluation/run_comparative_evaluation.py only. Does not affect the production Stage 1/2/3 pipeline.",
+    "split_strategy": "by_project",
+    "validation_fraction": 0.2,
+    "test_fraction": 0.2,
+    "random_seed": 42,
+    "fbeta": 2.0
   }
 }

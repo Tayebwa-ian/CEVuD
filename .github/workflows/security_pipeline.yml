@@ -69,7 +69,7 @@ jobs:
       - name: Execute Stage 1 (Static Analysis Engine Capture)
         run: |
           docker run --rm -v ${{ github.workspace }}:/app/workspace ${{ steps.image.outputs.image }}:latest \
-            -m semgrep.cli --config=p/python --config=/app/semgrep_rules/custom_appsec_rules.yaml --no-git-ignore --exclude src --exclude workspace_storage --json --output=/app/workspace/semgrep_results.json
+            semgrep --config=p/python --config=/app/semgrep_rules/custom_appsec_rules.yaml --no-git-ignore --exclude src --exclude workspace_storage --json --output=/app/workspace/semgrep_results.json /app/workspace
 
       - name: Execute Stage 2 (Local SLM Mathematical Gating)
         env:
@@ -79,7 +79,7 @@ jobs:
           docker run --rm \
             -e GITHUB_RUN_ID="run_${{ github.sha }}" \
             -v ${{ github.workspace }}:/app/workspace \
-            ${{ steps.image.outputs.image }}:latest src/triage_orchestrator.py --workspace /app/workspace --exclude-dirs "workspace_storage,tests,src"
+            ${{ steps.image.outputs.image }}:latest python src/triage_orchestrator.py --workspace /app/workspace --exclude-dirs "workspace_storage,tests,src"
 
       - name: Execute Stage 3 (DeepAgent Context Analysis & Synthesis)
         if: always()
@@ -95,7 +95,7 @@ jobs:
             -e GOOGLE_API_KEY \
             -e UNIPASSAU_API_KEY \
             -v ${{ github.workspace }}:/app/workspace \
-            ${{ steps.image.outputs.image }}:latest src/agent.py --workspace /app/workspace
+            ${{ steps.image.outputs.image }}:latest python src/agent.py --workspace /app/workspace
 
       - name: Move Runtime Outputs to Systematic Artifact Cache Location
         if: always()

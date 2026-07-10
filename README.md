@@ -1,102 +1,107 @@
 # CEVuD: Cost-Effective Vulnerability Detection
 
-CEVuD is a Python-based security triage pipeline that combines static analysis, local semantic scoring, and optional LLM-based remediation synthesis. The repository is designed for cost-aware code review workflows where only the highest-risk findings are escalated to a frontier model.
+CEVuD is a Python-based security triage pipeline designed to integrate into large-scale CI/CD environments. It combines static analysis (Semgrep), local semantic machine learning (CodeBERT), and optional frontier LLM-based remediation synthesis.
 
-## What the pipeline does
+The system is designed for **cost-aware code review workflows**. Running a frontier LLM (like GPT-4 or Claude) on every single file change is prohibitively expensive and slow. CEVuD solves this by using a zero-marginal-cost edge compute layer (a "gate") to filter out false positives and low-risk code, escalating only the highest-risk findings to the LLM.
 
-1. Stage 1: static analysis with Semgrep
-   - Runs Semgrep with the default Python ruleset plus the repository's custom taint rules.
-   - Produces a JSON findings file that records file locations and severity labels.
+---
 
-2. Stage 2: local triage and gating
-   - Extracts complete function-level code blocks from the target workspace using Python AST parsing.
-   - Runs a local CodeBERT-based classifier to estimate the probability that a snippet is a security vulnerability.
-   - Combines Semgrep severity and SLM probability with the configured weighted formula:
-     - $R = (W_1 \cdot S_{sev}) + (W_2 \cdot P_{slm})$
-   - Escalates when the score meets the threshold, when a critical static severity is found, or when the SLM score crosses the override boundary.
+## 🏗️ Architecture Overview
 
-3. Stage 3: optional remediation synthesis
-   - Reads the Stage 2 triage report and, if escalation is triggered, passes the flagged findings to a DeepAgent-style LLM workflow.
-   - Uses a local vector store for cross-file context and writes a consolidated remediation dossier.
+The pipeline operates in three distinct stages:
 
-## Repository layout
+1. **Stage 1: Static Taint Analysis**
+   - Runs Semgrep with standard Python rules plus proprietary custom taint rules.
+   - Traces untrusted data from sources to dangerous sinks.
+   - Outputs a fast, deterministic JSON report of potential vulnerabilities and their severity (`ERROR`, `WARNING`, `INFO`).
 
-- [src/triage_orchestrator.py](src/triage_orchestrator.py): orchestrates Stage 2, extracts code snippets, and writes the triage ledger.
-- [src/agent.py](src/agent.py): runs the Stage 3 reasoning loop and writes the remediation report.
-- [src/dataset_ingest.py](src/dataset_ingest.py): seeds the vector store from benchmark data or a repository crawl.
-- [src/evaluate_pipeline.py](src/evaluate_pipeline.py): runs the benchmark harness against the gold-standard cases.
-- [src/model_manager.py](src/model_manager.py): centralizes loading of the local classifier and embedding model.
-- [src/vector_store.py](src/vector_store.py): stores function-level code blocks and embeddings in SQLite.
-- [src/llm_factory.py](src/llm_factory.py): provides the LLM provider abstraction used by the agent.
-- [tests/](tests/): regression tests for parsing, gating, ingest, vector store access, and the end-to-end pipeline.
-- [.github/workflows/](.github/workflows/): CI workflows for the repository-local pipeline and the reusable external-repo workflow.
-- [Dockerfile](Dockerfile): builds a runtime image with Semgrep, application code, and the local model assets.
+2. **Stage 2: Local Triage & Gating (The "Smart Gate")**
+   - Parses the target workspace into an Abstract Syntax Tree (AST) to extract pristine function blocks corresponding to Semgrep findings.
+   - Uses a local CodeBERT sequence classifier (`jayansh21/codesheriff-bug-classifier`) to output a probabilistic threat score (`P_slm`).
+   - Calculates a combined risk score: `R = (W_1 * S_sev) + (W_2 * P_slm)`.
+   - **Escalates** the finding to Stage 3 if `R` exceeds a configurable threshold, or if critical static/semantic override thresholds are triggered.
 
-## Quick start
+3. **Stage 3: Remediation Synthesis**
+   - Only executed for findings that breach the Stage 2 gate.
+   - An autonomous LLM agent receives the flagged code.
+   - Uses a local SQLite vector store to perform Retrieval-Augmented Generation (RAG) for cross-file context mapping.
+   - Writes a highly structured, developer-ready `remediation_dossier.md` containing root cause analysis, exploit proof-of-concepts, and a secure code patch.
 
-### 1. Install dependencies
+---
 
+## 📁 Repository Layout
+
+### Core Execution
+- `src/triage_orchestrator.py`: Orchestrates Stage 2. Scores snippets and writes the triage ledger (`stage1_2_triage.json`).
+- `src/agent.py`: Runs Stage 3. Uses the triage ledger and vector store to generate the remediation dossier.
+- `src/dataset_ingest.py`: Parses codebases/manifests and indexes them into the SQLite vector store.
+- `src/diff_parser.py`: Analyzes Git diffs for PR-based incremental scanning.
+
+### Core Support & Models
+- `src/model_manager.py`: Centralizes HuggingFace model loading and local inference (CodeSheriff and embeddings).
+- `src/vector_store.py`: Manages SQLite storage for AST-parsed function blocks and their dense vectors.
+- `src/llm_factory.py`: Interface wrapper for calling external frontier LLMs.
+
+### Evaluation Framework
+- `src/evaluation/run_comparative_evaluation.py`: The master evaluation suite. Used to prove the cost-to-safety tradeoff across thousands of real-world commits.
+- `src/evaluation/grid_search.py`: Optimizes gating weights without human bias.
+- `src/evaluation/repo_provider.py`: Dynamically fetches specific historical git commits for testing and cleans them up.
+- `src/scripts/convert_cvefixes.py` & `convert_vudenc.py`: Dataset parsers to transform raw vulnerability databases into CEVuD manifest format.
+
+---
+
+## 🚀 Quick Start & Usage
+
+### 1. Installation
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 pip install semgrep
 ```
 
-### 2. Seed the local context store
+### 2. Standard Codebase Scan
+To scan a target codebase located at `/path/to/target`:
 
-For benchmark mode:
-
+**A. Vector Indexing**
 ```bash
-python src/dataset_ingest.py --mode benchmark --file tests/data/gold_standard.json
+python src/dataset_ingest.py --mode repo --path /path/to/target
 ```
 
-For repository mode:
-
+**B. Static Scan (Stage 1)**
 ```bash
-python src/dataset_ingest.py --mode repo --path /path/to/target/code
+semgrep --config p/python --config ./semgrep_rules/custom_appsec_rules.yaml \
+  --no-git-ignore --json --output /path/to/target/semgrep_results.json /path/to/target
 ```
 
-### 3. Run Stage 1: static scan
-
+**C. Local Gating (Stage 2)**
 ```bash
-semgrep --config p/python --config ./semgrep_rules/custom_appsec_rules.yaml --no-git-ignore --exclude tests --exclude workspace_storage --json --output /path/to/target/semgrep_results.json /path/to/target
+python src/triage_orchestrator.py --workspace /path/to/target --config config.json
 ```
+*(This produces `stage1_2_triage.json` inside the target's artifact directory)*
 
-### 4. Run Stage 2: local triage and gating
-
+**D. Remediation Agent (Stage 3)**
 ```bash
-python src/triage_orchestrator.py --workspace /path/to/target --config config.json --exclude-dirs "tests,workspace_storage,src"
-```
-
-This writes a file named `stage1_2_triage.json` under the target workspace's artifact directory.
-
-### 5. Run Stage 3: remediation synthesis
-
-```bash
-export OPENAI_API_KEY=your-key
+export OPENAI_API_KEY=your-api-key
 python src/agent.py --workspace /path/to/target --config config.json
 ```
 
-The agent writes a consolidated `remediation_dossier.md` when Stage 2 decides that escalation is required.
-
-## Configuration
-
-The default gate settings are defined in [config.json](config.json):
-
-- Static weight: `0.4`
-- SLM weight: `0.6`
-- Escalation threshold: `0.52`
-- SLM override threshold: `0.90`
-
-The runtime expects a workspace that contains the output files from the static scan and a writable artifact directory under `workspace_storage/artifacts/`.
-
-## Evaluation and tests
-
-Run the unit tests:
-
+### 3. Evaluating the Model (Benchmarking)
+If you want to prove the model's token reduction rate on real datasets:
 ```bash
-python -m pytest tests/
+# Convert a dataset
+python src/scripts/convert_cvefixes.py --db cvefixes.db --output benchmark_manifest.json
+
+# Run evaluation
+python src/evaluation/run_comparative_evaluation.py --manifest benchmark_manifest.json --config config.json
 ```
+*(Results and sensitivity plots are output to `workspace_storage/evaluations/`)*
 
-## CI/CD usage
+---
 
-The repository includes reusable GitHub Actions workflows for local PR scanning and external-repo scanning. The workflows run the same three stages in Docker and upload the generated artefacts under `workspace_storage/artifacts/run_<sha>/`.
+## ⚙️ Configuration
+The default gating thresholds are in `config.json`:
+- `weight_static`: 0.4
+- `weight_slm`: 0.6
+- `escalation_threshold`: 0.52
+- `slm_override_threshold`: 0.90

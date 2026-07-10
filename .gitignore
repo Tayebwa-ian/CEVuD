@@ -6,7 +6,7 @@ __pycache__/
 vulnerability_samples/
 skills/
 .agents
-ms.md
+design.md
 .pytest*
 .continue/
 test_config_manifest.json

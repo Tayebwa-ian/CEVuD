@@ -92,7 +92,7 @@ jobs:
           docker run --rm \
             -v ${{ github.workspace }}:/workspace \
             ${{ steps.image.outputs.image }}:latest \
-            -m semgrep.cli --config=p/python --config=/app/semgrep_rules/custom_appsec_rules.yaml --no-git-ignore --exclude src --exclude workspace_storage --exclude cevud-scanner --json --output=/workspace/semgrep_results.json /workspace
+            semgrep --config=p/python --config=/app/semgrep_rules/custom_appsec_rules.yaml --no-git-ignore --exclude src --exclude workspace_storage --exclude cevud-scanner --json --output=/workspace/semgrep_results.json /workspace
 
       - name: Execute Stage 2 (Local SLM Mathematical Gating)
         env:
@@ -103,7 +103,7 @@ jobs:
             -e GITHUB_RUN_ID="run_${{ github.sha }}" \
             -v ${{ github.workspace }}:/workspace \
             ${{ steps.image.outputs.image }}:latest \
-            /app/src/triage_orchestrator.py --workspace /workspace --config ${{ inputs.config-path }} --exclude-dirs "${{ inputs.exclude-dirs }},cevud-scanner"
+            python /app/src/triage_orchestrator.py --workspace /workspace --config ${{ inputs.config-path }} --exclude-dirs "${{ inputs.exclude-dirs }},cevud-scanner"
 
       - name: Execute Stage 3 (DeepAgent Context Analysis & Synthesis)
         if: always()
@@ -122,7 +122,7 @@ jobs:
             -e GITHUB_RUN_ID="run_${{ github.sha }}" \
             -v ${{ github.workspace }}:/workspace \
             ${{ steps.image.outputs.image }}:latest \
-            /app/src/agent.py --workspace /workspace --config ${{ inputs.config-path }}
+            python /app/src/agent.py --workspace /workspace --config ${{ inputs.config-path }}
 
       - name: Move Runtime Outputs to Systematic Artifact Cache Location
         if: always()

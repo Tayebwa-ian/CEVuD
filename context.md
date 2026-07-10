@@ -1,56 +1,56 @@
 # Project Context: CEVuD
 
-## Purpose
+**AI ASSISTANT GUIDE**: If you are an AI reading this, this document contains the core architectural philosophies, state management rules, and development guidelines for CEVuD. Reference this heavily when modifying the codebase.
 
-CEVuD is a three-stage pipeline for Python code security triage. It is intended for environments where full LLM review is too expensive to run on every finding, so the system uses a local classifier to decide which cases justify deeper synthesis.
+## 🎯 Purpose and Philosophy
 
-## Current implementation
+CEVuD (Cost-Effective Vulnerability Detection) is designed around a single undeniable reality in modern AppSec: **Frontier LLMs are too expensive to run on every line of code.**
 
-The repository currently implements the following flow:
+Our philosophy is **Gated Reasoning**. We do not trust static analysis (too many false positives). We do not trust local SLMs (too small to reason about complex multi-file logic). But when mathematically combined via a linear formula, they serve as a highly accurate, zero-cost gate. 
 
-1. Stage 1 collects static findings with Semgrep.
-2. Stage 2 extracts function-level source windows from the target workspace and scores them with a local CodeBERT classifier.
-3. Stage 3 optionally uses an LLM-backed reasoning agent to produce a remediation dossier for escalated findings.
+If you are asked to modify the pipeline, **do not break the staging boundaries**.
+- **Stage 1 (Semgrep)** should NEVER talk to an LLM.
+- **Stage 2 (Local SLM)** should NEVER talk to the network. It must run locally on the edge.
+- **Stage 3 (LLM)** should NEVER process raw files. It should only process the structured snippets output by Stage 2.
 
-The implementation is driven by the scripts in [src/](src/) and the workflows in [.github/workflows/](.github/workflows/).
+---
 
-## Runtime contract
+## 🧠 State Management & Data Flow
 
-The main execution contract is:
+CEVuD operates in stateless batches, coordinated by the file system.
 
-- The target workspace must contain a Semgrep JSON result file or be scanned before Stage 2 runs.
-- Stage 2 reads the Semgrep findings, extracts the enclosing function body, and writes a triage JSON report.
-- Stage 3 reads that triage report and only generates a remediation dossier when escalation was triggered.
+1. **The Vector Store (`workspace_storage/codebase_vectors`)**
+   - Managed by `src/vector_store.py` backed by SQLite.
+   - Contains AST-parsed function definitions and their dense CodeBERT embeddings.
+   - **AI Rule**: Do not attempt to query the vector store via generic SQL. Always use `VectorStore` class methods for RAG retrievals.
 
-## Key configuration values
+2. **The Triage Ledger (`stage1_2_triage.json`)**
+   - The contract between Stage 2 and Stage 3. 
+   - Contains `evaluated_file`, `code_snippet`, risk `metrics`, and a global `gate_decision`.
+   - **AI Rule**: If you modify the gating math in `src/evaluation/gate_strategies.py`, ensure the JSON structure output by `src/triage_orchestrator.py` accurately reflects those metric changes.
 
-The current defaults are stored in [config.json](config.json):
+3. **The Remediation Dossier (`remediation_dossier.md`)**
+   - The final, human-readable output of Stage 3. It must always include: Vulnerability Analysis, Source/Sink Lineage, Exploit PoC, and a Remediation Patch.
 
-- Static weight: `0.4`
-- SLM weight: `0.6`
-- Escalation threshold: `0.52`
-- SLM override threshold: `0.90`
-- Artifact directory: `workspace_storage/artifacts`
-- Vector database directory: `workspace_storage/codebase_vectors`
+---
 
-## Data flow
+## 📊 The Evaluation Suite (`src/evaluation/`)
 
-- [src/dataset_ingest.py](src/dataset_ingest.py) ingests benchmark cases or repository functions into the SQLite-backed vector store.
-- [src/triage_orchestrator.py](src/triage_orchestrator.py) uses the vector store and the local model manager to score snippets and produce the gate decision.
-- [src/agent.py](src/agent.py) uses the triage report, the vector store, and an LLM factory to create the markdown remediation dossier.
-- [src/evaluate_pipeline.py](src/evaluate_pipeline.py) runs the benchmark harness against the gold-standard dataset and persists evaluation artifacts.
+The evaluation logic is entirely decoupled from the runtime execution logic. This is intentional.
 
-## Output artifacts
+- `run_comparative_evaluation.py`: The master script. It pulls benchmark manifests, extracts raw scores using `raw_score_extractor.py`, splits the data (train/val/test), and tests our gating logic against baselines.
+- `repo_provider.py`: Contains robust `git` operations (with retries and exponential backoff) to dynamically fetch thousands of real-world commits on the fly, process them, and delete them to save disk space.
+- `grid_search.py`: Tunes the weights. **AI Rule**: Never hardcode gating weights based on test data. Weights must be dynamically derived via grid search on the validation split.
 
-The pipeline writes machine-readable and human-readable outputs under the target workspace's artifact directories:
+### Why do we use CVEfixes and VUDENC?
+We transitioned to these datasets (converted via `src/scripts/`) because testing on 24 internal cases causes overfitting. These datasets provide thousands of historical Python commits, ensuring the linear gate handles diverse, real-world coding anomalies.
 
-- `semgrep_results.json`: raw Stage 1 findings
-- `stage1_2_triage.json`: Stage 2 gate decisions and per-finding metrics
-- `remediation_dossier.md`: consolidated Stage 3 output
-- `evaluation_runs/<timestamp>/`: benchmark metrics and charts from the evaluator
+---
 
-## Operational notes
+## ⚖️ Configuration Contract
+All core thresholds are stored in `config.json`. 
+- `weight_static` + `weight_slm` MUST equal 1.0.
+- `escalation_threshold` (typically 0.52) defines the baseline for sending code to Stage 3.
+- `static_override_value` (1.0) and `slm_override_threshold` (0.90) act as safety nets. If either is breached, the risk score is bypassed and escalation is forced.
 
-- The system is intentionally conservative about LLM usage. Stage 3 should only run when the gate says it is necessary.
-- The local model and embeddings are cached under the workspace's model cache path to avoid repeated downloads.
-- The repository workflows use Docker and mount the target workspace into the container so the same code path can run locally or in CI.
+**AI ASSISTANT INSTRUCTION**: If a user asks you to "tune" the pipeline, do not manually alter `config.json` blindly. Instead, run the `run_comparative_evaluation.py` suite over a benchmark dataset, read the resulting `comparative_report.json` and sensitivity plots, and propose the data-backed weights to the user.

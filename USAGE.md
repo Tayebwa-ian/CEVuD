@@ -89,9 +89,31 @@ python -m pytest tests/
 
 ## Benchmarking
 
-To evaluate the pipeline over the bundled gold-standard data:
+The evaluation suite tests the cost-effectiveness and accuracy of the CEVuD gating logic against real-world vulnerability datasets.
+
+### 1. Prepare the Benchmark Manifest
+First, convert a raw vulnerability dataset (like CVEfixes or VUDENC) into the CEVuD manifest format using the provided scripts:
+
+For CVEfixes (SQLite DB):
+```bash
+python src/scripts/convert_cvefixes.py --db /path/to/cvefixes.db --output benchmark_manifest_cvefixes.json
+```
+
+For VUDENC (JSON):
+```bash
+python src/scripts/convert_vudenc.py --input /path/to/vudenc.json --output benchmark_manifest_vudenc.json
+```
+
+### 2. Run the Comparative Evaluation
+Execute the evaluation suite against your newly generated manifest. The script dynamically clones repositories at their exact historical commits, extracts the raw scores (Semgrep & SLM), splits the dataset, tunes the gate parameters, and evaluates the baselines.
 
 ```bash
-python src/dataset_ingest.py --mode benchmark --file tests/data/gold_standard.json
-python src/evaluate_pipeline.py
+python src/evaluation/run_comparative_evaluation.py --manifest benchmark_manifest_cvefixes.json --config config.json
 ```
+
+### 3. Review the Results
+All evaluation artifacts are permanently persisted in a timestamped directory (typically under `workspace_storage/evaluations/comparative_eval_<timestamp>/`). This folder contains:
+- `comparative_report.md`: A detailed Markdown report of metrics, baseline comparisons, and dataset splits.
+- `comparative_report.json`: The machine-readable equivalent.
+- `gate_sensitivity_heatmap.png` & `gate_threshold_sensitivity.png`: Visual graphs proving the optimal tuning parameters.
+- `raw_scores_cache.json`: The extracted scores, so you can safely re-run the evaluation (`--cache`) without re-cloning repositories.

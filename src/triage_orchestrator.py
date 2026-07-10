@@ -4,9 +4,20 @@ import ast
 import shutil
 import torch
 import os
+import sys
 from typing import List, Dict, Any
 from model_manager import ModelManager
 from vector_store import LocalVectorStore
+
+# ---------------------------------------------------------------------------
+# Single source of truth for the gate formula: src/evaluation/gate_strategies.py
+# defines `linear_weighted_gate`, which is imported here rather than
+# reimplemented, so the production gate and the gate evaluated in the
+# comparative evaluation suite (src/evaluation/run_comparative_evaluation.py)
+# can never silently drift apart.
+# ---------------------------------------------------------------------------
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "evaluation"))
+from .evaluation.gate_strategies import linear_weighted_gate
 
 class TriageOrchestrator:
     """
@@ -139,24 +150,35 @@ class TriageOrchestrator:
         severity_weight = severity_map.get(semgrep_severity, 0.0)
         w1 = self.config["gate_parameters"]["weight_static"]
         w2 = self.config["gate_parameters"]["weight_slm"]
-    
-        
-        # Calculate standard continuous risk boundary parameters
-        risk_score = (w1 * severity_weight) + (w2 * slm_score)
-        
-        # Determine baseline escalation criteria against the standard threshold config
-        escalation_threshold = self.config["gate_parameters"]["escalation_threshold"]
-        base_escalate = risk_score >= escalation_threshold
 
-        #  Evaluate short-circuit override conditions
-        # Condition A: Static severity score is absolute (1.0)
-        # Condition B: SLM classification confidence breaches the 90% certainty bound
+        # Calculate standard continuous risk boundary parameters (kept here,
+        # rather than only inside linear_weighted_gate, so the numeric risk
+        # score is still available for the triage report's metrics block —
+        # linear_weighted_gate itself only returns the boolean decision).
+        risk_score = (w1 * severity_weight) + (w2 * slm_score)
+
+        # Delegate the actual escalation decision — including the
+        # static/SLM override — to the shared gate_strategies module. This
+        # is the SAME function used by the comparative evaluation suite's
+        # grid search, ablations, and baseline comparisons
+        # (see src/evaluation/gate_strategies.py), so production behavior
+        # and evaluated behavior cannot drift apart.
         slm_override_threshold = self.config["gate_parameters"].get("slm_override_threshold", 0.90)
-        static_override = (severity_weight >= 1.0)
-        slm_override = (slm_score > slm_override_threshold)
-        
-        # Combine base calculations with the new non-linear safety override flags
-        forced_escalation = base_escalate or static_override or slm_override
+        gate_params = {
+            "weight_static": w1,
+            "weight_slm": w2,
+            "escalation_threshold": self.config["gate_parameters"]["escalation_threshold"],
+            "override_enabled": True,
+            "static_override_value": 1.0,
+            "slm_override_threshold": slm_override_threshold,
+        }
+        forced_escalation = linear_weighted_gate(severity_weight, slm_score, gate_params)
+
+        # Recompute the override flags here only for reporting purposes
+        # (which override fired, if any) — the escalation DECISION itself
+        # already came from linear_weighted_gate above.
+        static_override = severity_weight >= 1.0
+        slm_override = slm_score > slm_override_threshold
 
         # If a short-circuit override triggers, ensure the returned risk score reflects 
         # a critical state so downstream components (Stage 3 Agent) prioritize it.

@@ -49,11 +49,23 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    pipx \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder
 COPY --from=builder /root/.local /root/.local
 ENV PATH=/root/.local/bin:$PATH
+
+# Install semgrep into its own isolated virtualenv via pipx.
+# semgrep pins wcmatch~=8.3, which directly conflicts with deepagents'
+# wcmatch>=10.1 requirement — they cannot share one environment.
+# pipx keeps semgrep's dependency tree fully separate; only the
+# `semgrep` executable is exposed on PATH (into /root/.local/bin,
+# alongside the --user-installed app scripts, with no site-packages
+# collision since pipx's venv lives under /root/.local/pipx/venvs/).
+ENV PIPX_HOME=/root/.local/pipx
+ENV PIPX_BIN_DIR=/root/.local/bin
+RUN pipx install semgrep==1.166.0
 
 # Copy the pre-downloaded model from model_downloader stage
 COPY --from=model_downloader /app/model /app/model
@@ -70,5 +82,8 @@ ENV PYTHONPATH=/app
 # Set model path for ModelManager to use
 ENV MODEL_PATH=/app/model/codesheriff
 
-ENTRYPOINT ["python"]
-
+# No fixed ENTRYPOINT: this image runs both `semgrep ...` (isolated pipx venv)
+# and `python /app/src/*.py ...` (app venv). Callers must specify the full
+# command, e.g.:
+#   docker run <image> semgrep --config=... /workspace
+#   docker run <image> python /app/src/triage_orchestrator.py --workspace /workspace
