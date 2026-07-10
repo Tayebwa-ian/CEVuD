@@ -14,7 +14,7 @@ COPY requirements.txt .
 
 # Leverage BuildKit cache mount for pip downloads
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir --user -r requirements.txt
+    pip install --user -r requirements.txt
 
 # ==========================================
 # STAGE 2: Download and Cache SLM Model (Critical Optimization)

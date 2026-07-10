@@ -46,29 +46,7 @@ jobs:
           mkdir -p workspace_storage/codebase_vectors 
           mkdir -p workspace_storage/artifacts/run_${{ github.sha }}
 
-      # --- 🚫 REMOVE: Cache SLM Weights (NO LONGER NEEDED) ---
-      # - name: Cache Small Language Model Weights
-      #   uses: actions/cache@v4
-      #   with:
-      #     path: workspace_storage/model_cache
-      #     key: ${{ runner.os }}-slm-weights-v1
-      #     restore-keys: |
-      #       ${{ runner.os }}-slm-weights-
 
-      # --- 🚫 REMOVE: Build & Load Docker Image ---
-      # - name: Setup Docker Buildx Engine
-      #   uses: docker/setup-buildx-action@v3
-      # - name: Build Operational Security Pipeline Container with GHA Caching
-      #   uses: docker/build-push-action@v5
-      #   with:
-      #     context: ./cevud-scanner
-      #     file: ./cevud-scanner/Dockerfile
-      #     tags: appsec-pipeline:latest
-      #     outputs: type=docker,dest=/tmp/appsec-pipeline.tar
-      #     cache-from: type=gha
-      #     cache-to: type=gha,mode=max
-      # - name: Load Docker Image Locally
-      #   run: docker load -i /tmp/appsec-pipeline.tar
 
       # --- ✅ NEW: Login to GHCR and Pull Pre-Built Image ---
       - name: Login to GitHub Container Registry

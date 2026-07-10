@@ -9,7 +9,7 @@ on:
       - 'semgrep_rules/**'
       - 'requirements.txt'
       - 'config.json'
-      - '.github/workflows/publish-image.yml'
+      - '.github/workflows/publish_image.yml'
   workflow_dispatch: {}   # lets you trigger it manually from the Actions tab
 
 env:
@@ -53,4 +53,4 @@ jobs:
             ${{ steps.image.outputs.image }}:latest
             ${{ steps.image.outputs.image }}:${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
