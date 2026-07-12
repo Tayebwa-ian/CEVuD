@@ -28,7 +28,7 @@ class TrainingConfig:
     # ── Data paths ─────────────────────────────────────────────────────────
     manifest_path: str = "benchmark_manifest_cvefixes.json"
     train_path: str = "training_data/train.jsonl"
-    val_path: str = "training_data/val.jsonl"
+    val_path: str = "training_data/validation.jsonl"
     test_path: str = "training_data/test.jsonl"
     output_dir: str = "training_output"
 
