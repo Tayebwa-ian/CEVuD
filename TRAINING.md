@@ -93,7 +93,8 @@ python -m training.cli build-dataset --few-shot --cross-file --max-workers 8
 
 1. Loads `benchmark_manifest_cvefixes.json`.
 2. For each selected project, clones the repo with `git clone --filter=blob:none`
-   into `.training_cache/clones/` (persisted across runs).
+   into `.training_cache/clones/`, extracts the needed context, then **deletes
+   the clone immediately** so no repository source is left on disk.
 3. For each sample:
    - Resolves the correct commit (parent of fix commit for vulnerable
      samples, fix commit itself for safe samples).
@@ -190,8 +191,7 @@ On a **4-core CPU, 8 GB RAM** machine with a 350-sample few-shot dataset:
 
 | Phase                      | Wall-clock |
 |----------------------------|-----------|
-| Dataset build (first run, 20 projects) | 10–30 min |
-| Dataset build (cached)     | < 2 min   |
+| Dataset build (20 projects) | 10–30 min |
 | Training (3 epochs, batch 8) | 15–40 min |
 | Evaluation                 | < 2 min   |
 
@@ -376,7 +376,8 @@ python -m training.cli run-all \
 
 **`git clone` fails for a repo (404 / auth / rate-limit)**
 The builder logs the error and skips that project.  Re-run after fixing
-network access; cached projects are not re-cloned.
+network access; each run re-clones the needed repos (clones are not
+persisted between runs, so a prior failure leaves nothing to clean up).
 
 **OOM during training**
 Reduce `--batch-size` to 4 or 2.  The trainer uses `use_cpu=True` by

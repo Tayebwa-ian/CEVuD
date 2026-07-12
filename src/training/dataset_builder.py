@@ -12,9 +12,9 @@ Design choices
   inference, eliminating train/inference skew.
 * **Parallel cloning** -- a ThreadPoolExecutor clones repos concurrently,
   cutting wall-clock time on multi-core machines.
-* **Clone caching** -- a `.training_cache/clones/` directory persists
-  `--filter=blob:none` clones across runs so only the first run pays the
-  network cost.
+* **No clone persistence** -- each `--filter=blob:none` clone lives only for
+  the duration of that project's enrichment and is deleted immediately
+  afterwards, so no repository source is left on disk after the build.
 * **Graceful degradation** -- if `git show` fails (rename, missing commit,
   network glitch), the builder falls back to the manifest's embedded
   `source_code` so the sample is not silently dropped.
@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -104,31 +105,18 @@ def _get_parent_commit(repo_path: str, commit: str) -> Optional[str]:
     return None
 
 
-def _get_cached_clone_dir(git_url: str, cache_root: Path) -> Optional[str]:
-    url_hash = hashlib.md5(git_url.encode()).hexdigest()[:12]
-    cache_path = cache_root / url_hash
-    if cache_path.exists() and (cache_path / ".git").exists():
-        try:
-            subprocess.run(
-                ["git", "-C", str(cache_path), "rev-parse", "--git-dir"],
-                capture_output=True, check=True,
-            )
-            return str(cache_path)
-        except subprocess.CalledProcessError:
-            shutil.rmtree(cache_path, ignore_errors=True)
-    return None
-
-
 def _clone_or_reuse(git_url: str, ref, cache_root: Path) -> str:
-    cached = _get_cached_clone_dir(git_url, cache_root)
-    if cached is not None:
-        return cached
+    """Clones ``git_url`` into a fresh, unique subdirectory of ``cache_root``.
 
+    Each call gets its own directory (keyed by a URL hash *plus* a random
+    suffix) so concurrent projects can never share — and therefore never
+    delete — a checkout another thread is still reading from. The caller
+    (``_process_project``) is responsible for deleting the directory once its
+    samples have been enriched; clones are intentionally *not* reused or
+    persisted across runs.
+    """
     url_hash = hashlib.md5(git_url.encode()).hexdigest()[:12]
-    dest = str(cache_root / url_hash)
-    if os.path.exists(dest):
-        shutil.rmtree(dest, ignore_errors=True)
-
+    dest = str(cache_root / f"{url_hash}_{uuid.uuid4().hex[:8]}")
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     clone_repo(git_url, ref=ref, dest_dir=dest, shallow=False)
     return dest
@@ -216,8 +204,12 @@ def _process_project(
         print(f"[!]  project {project.project}: {exc}")
         return []
     finally:
+        # Delete the clone immediately after extracting the needed information.
+        # The enriched samples already carry the full function, imports, and
+        # (optionally) cross-file context, so the on-disk checkout is no longer
+        # required and must not persist on disk.
         if dest_dir and os.path.exists(dest_dir):
-            pass  # keep clone in cache; cleanup happens on cache eviction
+            shutil.rmtree(dest_dir, ignore_errors=True)
 
 
 # ── Public API ──────────────────────────────────────────────────────────────
