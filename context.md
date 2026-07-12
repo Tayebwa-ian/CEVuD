@@ -21,7 +21,7 @@ CEVuD operates in stateless batches, coordinated by the file system.
 
 1. **The Vector Store (`workspace_storage/codebase_vectors`)**
    - Managed by `src/vector_store.py` backed by SQLite.
-   - Contains AST-parsed function definitions and their dense CodeBERT embeddings.
+   - Contains AST-parsed function definitions and their dense CodeBERT (`microsoft/codebert-base`) embeddings, used for RAG retrieval only.
    - **AI Rule**: Do not attempt to query the vector store via generic SQL. Always use `VectorStore` class methods for RAG retrievals.
 
 2. **The Triage Ledger (`stage1_2_triage.json`)**
@@ -42,10 +42,25 @@ The evaluation logic is entirely decoupled from the runtime execution logic. Thi
 - `repo_provider.py`: Contains robust `git` operations (with retries and exponential backoff) to dynamically fetch thousands of real-world commits on the fly, process them, and delete them to save disk space.
 - `grid_search.py`: Tunes the weights. **AI Rule**: Never hardcode gating weights based on test data. Weights must be dynamically derived via grid search on the validation split.
 
-### Why do we use CVEfixes and VUDENC?
-We transitioned to these datasets (converted via `src/scripts/`) because testing on 24 internal cases causes overfitting. These datasets provide thousands of historical Python commits, ensuring the linear gate handles diverse, real-world coding anomalies.
+## 🏋️ Custom Classifier Training (`src/training/`)
 
----
+The `src/training/` package provides a **few-shot, no-augmentation** pipeline to
+fine-tune a custom CodeBERT vulnerability classifier on the existing CVEFixes
+benchmark. It reuses the same enrichment utilities as the production pipeline,
+so train/inference context is identical.
+
+- `dataset_builder.py`: Clones repos, expands samples to full function blocks with
+  imports, applies few-shot capping (per-class, per-CWE, total), and splits by
+  project. Uses `.training_cache/clones/` to persist clones across runs.
+- `trainer.py`: Fine-tunes `microsoft/codebert-base` with HuggingFace `Trainer`,
+  saving the best checkpoint by validation F1.
+- `evaluator.py`: Computes accuracy, precision, recall, F1, F2, ROC-AUC, PR-AUC,
+  and generates calibration/ROC/PR/confusion plots.
+- `cli.py`: Unified CLI (`build-dataset`, `train`, `evaluate`, `run-all`).
+
+**AI Rule**: The training pipeline never augments data. It only selects and caps
+the existing real-world samples. If a model cannot learn from the capped dataset,
+increase the caps (more projects or more samples per class), not synthetic data.
 
 ## ⚖️ Configuration Contract
 All core thresholds are stored in `config.json`. 
@@ -54,3 +69,5 @@ All core thresholds are stored in `config.json`.
 - `static_override_value` (1.0) and `slm_override_threshold` (0.90) act as safety nets. If either is breached, the risk score is bypassed and escalation is forced.
 
 **AI ASSISTANT INSTRUCTION**: If a user asks you to "tune" the pipeline, do not manually alter `config.json` blindly. Instead, run the `run_comparative_evaluation.py` suite over a benchmark dataset, read the resulting `comparative_report.json` and sensitivity plots, and propose the data-backed weights to the user.
+
+**The Local SLM (Stage 2 classifier).** The edge gate is `jayansh21/codesheriff-bug-classifier` (fine-tuned from `microsoft/codebert-base`, 125M params). It is a single-label (softmax) 5-class model; `ModelManager` auto-detects this and gates on its **Security Vulnerability** class, so the gate receives a single `[0, 1]` threat probability (`P_slm`). To swap in a different local classifier, change `models.classifier_model` in `config.json` — both single-label (softmax) and multi-label (sigmoid) heads are supported automatically.

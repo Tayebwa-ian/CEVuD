@@ -17,6 +17,7 @@ cuda-bindings
 cuda-pathfinder
 cuda-toolkit
 cycler
+datasets
 deepagents
 distro
 docstring_parser
@@ -124,6 +125,7 @@ rpds-py
 ruamel.yaml
 ruamel.yaml.clib
 safetensors
+scikit-learn
 semantic-version
 setuptools
 shellingham

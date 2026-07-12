@@ -10,6 +10,15 @@ on:
       - 'requirements.txt'
       - 'config.json'
       - '.github/workflows/publish_image.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'Dockerfile'
+      - 'src/**'
+      - 'semgrep_rules/**'
+      - 'requirements.txt'
+      - 'config.json'
+      - '.github/workflows/publish_image.yml'
   workflow_dispatch: {}   # lets you trigger it manually from the Actions tab
 
 env:
@@ -37,6 +46,10 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        # Only needed when we actually push (push events). On pull_request
+        # we build-without-pushing, which needs no registry auth — and fork
+        # PRs don't receive GITHUB_TOKEN anyway, so skip login there.
+        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -48,7 +61,10 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          push: true
+          # Only push on `push` events. On `pull_request` we still build
+          # (with the GHA cache) to catch a broken Dockerfile before merge,
+          # but never publish from an untrusted fork ref.
+          push: ${{ github.event_name == 'push' }}
           tags: |
             ${{ steps.image.outputs.image }}:latest
             ${{ steps.image.outputs.image }}:${{ github.sha }}

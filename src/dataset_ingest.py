@@ -240,3 +240,38 @@ class IngestManager:
             print(f"[+] Processed {processed}/{len(target_files)} files: {file_path}")
 
         print(f"[+] Repository ingestion complete. Indexed {count} functions from {processed} modified files.")
+
+
+def _cli_main() -> None:
+    """Command-line entry point so the documented commands work::
+
+        python src/dataset_ingest.py --mode benchmark --file <gold.json>
+        python src/dataset_ingest.py --mode repo --path <repo/>
+
+    The vector DB is created under the ``workspace_root`` declared in
+    config.json (``workspace_storage/codebase_vectors`` by default).
+    """
+    import argparse
+    parser = argparse.ArgumentParser(description="CEVuD vector-store ingestion")
+    parser.add_argument("--config", default="config.json", help="Path to config.json")
+    parser.add_argument(
+        "--mode", required=True, choices=["benchmark", "repo"],
+        help="`benchmark` seeds gold-standard JSON; `repo` crawls a local repo.",
+    )
+    parser.add_argument("--file", default=None, help="Gold-standard JSON (mode=benchmark)")
+    parser.add_argument("--path", default=None, help="Local repo root (mode=repo)")
+    args = parser.parse_args()
+
+    manager = IngestManager(args.config)
+    if args.mode == "benchmark":
+        if not args.file:
+            parser.error("--file is required for --mode benchmark")
+        manager.ingest_benchmark_json(args.file)
+    else:
+        if not args.path:
+            parser.error("--path is required for --mode repo")
+        manager.ingest_repository(args.path)
+
+
+if __name__ == "__main__":
+    _cli_main()

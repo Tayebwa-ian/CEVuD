@@ -88,6 +88,13 @@ def _parse_sample(raw: Dict[str, Any], project: str) -> BenchmarkSample:
         label=raw["label"],
         vulnerability_type=raw.get("vulnerability_type"),
         source_code=raw.get("source_code"),
+        repo_url=raw.get("repo_url"),
+        commit_id=raw.get("commit_id"),
+        target_commit=raw.get("target_commit"),
+        cve_id=raw.get("cve_id"),
+        cvss_score=raw.get("cvss_score"),
+        fixed_code=raw.get("fixed_code"),
+        diff_with_context=raw.get("diff_with_context"),
     )
 
 

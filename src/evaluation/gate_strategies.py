@@ -19,7 +19,7 @@ is itself worth stating explicitly in the paper:
       finding goes straight to the LLM — which is exactly what a
       standalone "Semgrep only" detector does. See `semgrep_only`.
 
-    - "CodeSheriff only" and "CodeSheriff + LLM without Stage 1" are
+    - "SLM only" and "SLM + LLM without Stage 1" are
       likewise the same rule: without Stage 1 filtering, the SLM score
       alone decides escalation. See `codesheriff_only`.
 
@@ -108,8 +108,8 @@ def semgrep_only(severity_weight: float, slm_score: float, params: Dict[str, Any
 def codesheriff_only(severity_weight: float, slm_score: float, params: Dict[str, Any] = None) -> bool:
     """Escalates based solely on the SLM probability, ignoring Semgrep entirely.
 
-    This is both the "CodeSheriff only" detector baseline and the
-    "CodeSheriff + LLM without Stage 1" pipeline ablation (see module
+    This is both the "SLM only" detector baseline and the
+    "SLM + LLM without Stage 1" pipeline ablation (see module
     docstring): with no static pre-filter, the SLM score alone decides.
 
     params:
@@ -180,8 +180,8 @@ GATE_STRATEGIES: Dict[str, StrategySpec] = {
     ),
     "codesheriff_only": StrategySpec(
         codesheriff_only,
-        "CodeSheriff (SLM) only",
-        "Escalate on SLM probability alone. Equivalent to 'CodeSheriff + LLM without Stage 1'.",
+        "SLM (local classifier) only",
+        "Escalate on SLM probability alone. Equivalent to 'SLM + LLM without Stage 1'.",
     ),
     "always_llm": StrategySpec(
         always_llm,
@@ -190,7 +190,7 @@ GATE_STRATEGIES: Dict[str, StrategySpec] = {
     ),
     "semgrep_or_codesheriff": StrategySpec(
         semgrep_or_codesheriff,
-        "Semgrep OR CodeSheriff",
+        "Semgrep OR SLM",
         "Escalate if either single-signal baseline alone would escalate.",
     ),
     "cevud_full": StrategySpec(

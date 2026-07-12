@@ -52,6 +52,10 @@ class ModelManager:
                     "workspace_root": "workspace_storage",
                     "model_cache_dir": "model_cache"
                 },
+                "models": {
+                    "classifier_model": "jayansh21/codesheriff-bug-classifier",
+                    "embedding_model": "microsoft/codebert-base"
+                },
                 "gate_parameters": {
                     "weight_static": 0.4,
                     "weight_slm": 0.6,
@@ -80,25 +84,32 @@ class ModelManager:
         except Exception:
             self.cache_dir = os.path.join(repo_root, "workspace_storage", "model_cache")
         os.makedirs(self.cache_dir, exist_ok=True)
-        self.classifier_model_name = "jayansh21/codesheriff-bug-classifier"
-        self.embedding_model_name = "microsoft/codebert-base"
+        models_cfg = config.get("models", {}) if "config" in locals() else {}
+        self.classifier_model_name = models_cfg.get(
+            "classifier_model", "jayansh21/codesheriff-bug-classifier"
+        )
+        self.embedding_model_name = models_cfg.get(
+            "embedding_model", "microsoft/codebert-base"
+        )
         self._classifier_tokenizer = None
         self._classifier_model = None
         self._embedding_tokenizer = None
         self._embedding_model = None
         self._initialized = True
-        self._vuln_class_idx = None  # Initialize for auto-detection
+        self._scoring_mode = None       # "softmax" | "multilabel" (auto-detected)
+        self._vuln_class_idx = None     # softmax: security-vulnerability class
+        self._safe_class_idx = None     # multilabel: dedicated "safe" class
 
     def get_classifier(self) -> Tuple[AutoTokenizer, AutoModelForSequenceClassification]:
         """
-        Returns the pre-trained CodeBERT classifier for vulnerability scoring.
+        Returns the pre-trained SLM classifier for vulnerability scoring.
         Loads and caches the model if not already loaded.
 
         Returns:
             Tuple[AutoTokenizer, AutoModelForSequenceClassification]: Tokenizer and classifier model.
         """
         if self._classifier_tokenizer is None or self._classifier_model is None:
-            print(f"[*] Loading CodeBERT Classifier: {self.classifier_model_name} (first use)")
+            print(f"[*] Loading SLM Classifier: {self.classifier_model_name} (first use)")
             self._classifier_tokenizer = AutoTokenizer.from_pretrained(
                 self.classifier_model_name,
                 cache_dir=self.cache_dir
@@ -149,9 +160,9 @@ class ModelManager:
 
         tokenizer, model = self.get_classifier()
 
-        # Ensure we have vuln_class_idx from model config
-        if not hasattr(self, "_vuln_class_idx") or self._vuln_class_idx is None:
-            self._detect_vulnerability_class(model)
+        # Configure the logits->probability mapping once per model load.
+        if self._scoring_mode is None:
+            self._configure_scoring(model)
 
         inputs = tokenizer(
             code_snippets,
@@ -183,28 +194,114 @@ class ModelManager:
             if logits is None:
                 raise TypeError("Could not obtain logits from model output")
 
-            probabilities = torch.softmax(logits, dim=1)
-            vuln_probs = probabilities[:, self._vuln_class_idx].tolist()
+            if self._scoring_mode == "multilabel":
+                # Multi-label head (BCEWithLogitsLoss): each of the 31
+                # classes is an independent sigmoid. In practice the dedicated
+                # "safe" class fires ~1.0 even for vulnerable code, so
+                # 1 - P(safe) alone collapses every score to ~0 and the gate
+                # stops escalating real vulnerabilities. The real vulnerability
+                # signal lives in the per-CWE probabilities, so CEVuD's threat
+                # score is the MAXIMUM over the 30 CWE classes, with
+                # (1 - P(safe)) kept as a floor:
+                #   P_slm = max(1 - P(safe), max_i P(CWE_i))
+                # -> a single [0,1] score that still escalates on a strong
+                # per-CWE hit while respecting an explicit safe verdict.
+                probs = torch.sigmoid(logits)
+                safe = probs[:, self._safe_class_idx]
+                num_labels = probs.shape[1]
+                cwe_idx = [i for i in range(num_labels) if i != self._safe_class_idx]
+                cwe_max = probs[:, cwe_idx].max(dim=1).values
+                vuln = torch.maximum(1.0 - safe, cwe_max)
+                vuln_probs = vuln.tolist()
+            else:
+                # Single-label head (CrossEntropy): softmax over classes, and we
+                # gate on the dedicated security-vulnerability class.
+                probabilities = torch.softmax(logits, dim=1)
+                vuln_probs = probabilities[:, self._vuln_class_idx].tolist()
             return vuln_probs
-    
-    def _detect_vulnerability_class(self, model):
-        """Auto-detect which output class corresponds to 'Security Vulnerability'."""
-        if not hasattr(model.config, "id2label"):
-            print("[!] Model has no id2label mapping. Falling back to index 1.")
-            self._vuln_class_idx = 1
+
+    def _configure_scoring(self, model):
+        """Decide how raw logits map to a single vulnerability probability.
+
+        Two output formats are supported and auto-detected from the model's
+        ``id2label`` mapping:
+
+        * **Single-label softmax** (e.g. ``jayansh21/codesheriff-bug-classifier``):
+          5 mutually-exclusive classes, one of which is the security
+          vulnerability class -> ``P(vuln) = softmax[vuln_idx]``.
+        * **Multi-label sigmoid** (e.g.
+          ``ayshajavd/graphcodebert-vuln-classifier``): 31 independent classes
+          (30 CWE categories + a dedicated "safe" class). In practice the
+          ``safe`` class fires ~1.0 even for vulnerable code, so scoring as
+          ``1 - P(safe)`` collapses every score to ~0. The real
+          vulnerability signal lives in the per-CWE probabilities, so the gate
+          score is ``P_slm = max(1 - P(safe), max_i P(CWE_i))`` -- a single
+          ``[0, 1]`` value that escalates on a strong per-CWE hit while
+          still respecting an explicit safe verdict.
+        """
+        id2label = getattr(model.config, "id2label", None)
+        if id2label is not None:
+            print(f"[*] Model labels: {id2label}")
+
+        # Multi-label mode: a dedicated "safe"/"benign"/"clean" class implies
+        # the other classes are independent vulnerability tags.
+        safe_labels = ("safe", "benign", "not_vulnerable", "non-vulnerable", "clean")
+        safe_idx = None
+        if id2label is not None:
+            for idx, label in id2label.items():
+                if label.lower() in safe_labels:
+                    safe_idx = int(idx)
+                    break
+
+        if safe_idx is not None:
+            self._scoring_mode = "multilabel"
+            self._safe_class_idx = safe_idx
+            print(f"[+] Multi-label classifier detected. Safe class idx {safe_idx} "
+                  f"-> '{id2label[safe_idx]}'. Scoring as P_slm = max(1 - P(safe), max_i P(CWE_i)).")
             return
 
-        id2label = model.config.id2label
-        print(f"[*] Model labels: {id2label}")
+        # Single-label mode: pick the security-vulnerability class to gate on.
+        self._scoring_mode = "softmax"
+        if id2label is None:
+            print("[!] Model has no id2label mapping. Falling back to index 3 "
+                  "(Security Vulnerability).")
+            self._vuln_class_idx = 3
+            return
+        self._vuln_class_idx = self._detect_security_class(id2label)
 
-        # Look for any label containing security-relevant keywords
-        vuln_keywords = ["security", "vuln", "bug", "exploit", "attack", "risk"]
+    def _detect_security_class(self, id2label):
+        """Identify the single output class that means *security* vulnerability.
+
+        A naive keyword scan over the labels is dangerous: the word "risk"
+        appears in "Null Reference Risk", so matching on "risk"/"bug" would
+        wrongly select that class and report the probability of a null
+        dereference as the vulnerability score -- an obvious SQLi would then
+        score ~0 and never escalate. We therefore match the *security
+        vulnerability* class specifically, in priority order.
+
+        Returns:
+            int: index of the security-vulnerability class.
+        """
+        # Tier 1: the explicit security-vulnerability class.
         for idx, label in id2label.items():
-            if any(kw in label.lower() for kw in vuln_keywords):
-                self._vuln_class_idx = idx
-                print(f"[+] Auto-detected vulnerability class: {idx} → '{label}'")
-                return
+            low = label.lower()
+            if "security" in low and ("vulnerab" in low or "vuln" in low):
+                print(f"[+] Detected Security Vulnerability class: {idx} -> '{label}'")
+                return int(idx)
 
-        # Fallback: if none found, use index 1 (historical default)
-        print("[!] No vulnerability label detected. Falling back to index 1.")
-        self._vuln_class_idx = 1
+        # Tier 2: any label that reads as a security bug.
+        for idx, label in id2label.items():
+            if "security" in label.lower():
+                print(f"[+] Detected Security class: {idx} -> '{label}'")
+                return int(idx)
+
+        # Tier 3: a generic vulnerability/bug label (no security-specific class).
+        for idx, label in id2label.items():
+            low = label.lower()
+            if "vulnerab" in low or "vuln" in low or "exploit" in low:
+                print(f"[+] Detected Vulnerability class: {idx} -> '{label}'")
+                return int(idx)
+
+        # Tier 4: last-resort fallback.
+        print("[!] No security/vulnerability label detected. Falling back to index 3.")
+        return 3

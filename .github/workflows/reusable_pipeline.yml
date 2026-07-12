@@ -13,6 +13,11 @@ on:
         required: false
         type: string
         default: "/app/config.json"
+      scanner-repo:
+        description: "Owner/name of the repo that holds the CEVuD scanner code (defaults to the calling repo so forks stay in sync with their own image)"
+        required: false
+        type: string
+        default: "${{ github.repository }}"
     secrets:
       OPENAI_API_KEY:
         required: true
@@ -37,7 +42,7 @@ jobs:
       - name: Checkout CEVuD Pipeline Codebase
         uses: actions/checkout@v4
         with:
-          repository: Tayebwa-ian/CEVuD
+          repository: ${{ inputs.scanner-repo }}
           path: cevud-scanner
           ref: main
 
@@ -59,7 +64,8 @@ jobs:
       - name: Compute lowercase image reference
         id: image
         run: |
-          echo "image=ghcr.io/tayebwa-ian/cevud/appsec-pipeline" >> "$GITHUB_OUTPUT"
+          IMAGE=$(echo "ghcr.io/${{ github.repository }}/appsec-pipeline" | tr '[:upper:]' '[:lower:]')
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
       - name: Pull Pre-Built Security Pipeline Image
         run: |

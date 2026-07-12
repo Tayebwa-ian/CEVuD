@@ -32,14 +32,26 @@ RUN pip install --no-cache-dir transformers huggingface_hub
 # Create model directory
 RUN mkdir -p /app/model
 
-# Use echo + python -c with escaped quotes — shell-safe multi-line command
+# Download BOTH models into the HuggingFace *cache* layout under
+# /app/model_cache. ModelManager resolves weights via `cache_dir`
+# (config -> paths.model_cache_dir), which we repoint at
+# /app/model_cache below — so the baked weights are actually
+# reused at runtime (no per-run HuggingFace download) and the
+# pipeline runs fully offline. snapshot_download's `local_dir`
+# must be the exact `models--<org>--<repo>` path so that
+# `from_pretrained(cache_dir='/app/model_cache')` finds it.
 RUN echo "from huggingface_hub import snapshot_download; \
 snapshot_download( \
     repo_id='jayansh21/codesheriff-bug-classifier', \
-    local_dir='/app/model/codesheriff', \
+    local_dir='/app/model_cache/models--jayansh21--codesheriff-bug-classifier', \
     local_dir_use_symlinks=False, \
     revision='main' \
-)" | python3
+); \
+snapshot_download( \
+    repo_id='microsoft/codebert-base', \
+    local_dir='/app/model_cache/models--microsoft--codebert-base', \
+    local_dir_use_symlinks=False \
+    )" | python3
 # ==========================================
 # STAGE 3: Final Ephemeral Runtime Environment
 # ==========================================
@@ -67,20 +79,44 @@ ENV PIPX_HOME=/root/.local/pipx
 ENV PIPX_BIN_DIR=/root/.local/bin
 RUN pipx install semgrep==1.166.0
 
-# Copy the pre-downloaded model from model_downloader stage
-COPY --from=model_downloader /app/model /app/model
+# Copy the pre-downloaded model cache from model_downloader stage
+COPY --from=model_downloader /app/model_cache /app/model_cache
 
 # Copy application code and config
 COPY config.json .
 COPY src/ ./src/
 COPY semgrep_rules/ ./semgrep_rules/
 
+# Optional: copy a custom-trained model into the image.
+# Pass --build-arg CUSTOM_MODEL_PATH=/path/to/training_output/latest/model
+# at build time to bake your fine-tuned weights into the image.
+ARG CUSTOM_MODEL_PATH=""
+RUN if [ -n "$CUSTOM_MODEL_PATH" ]; then \
+        echo "[*] Baking custom model from $CUSTOM_MODEL_PATH"; \
+        mkdir -p /app/custom_model; \
+        cp -r "$CUSTOM_MODEL_PATH"/* /app/custom_model/; \
+    fi
+
+# Point ModelManager's cache_dir at the baked model cache so the
+# pre-downloaded weights are reused (no network, fast re-runs).
+# If a custom model was baked, repoint the classifier to it.
+RUN python -c "import json; p='config.json'; d=json.load(open(p)); \
+d['paths']['model_cache_dir']='/app/model_cache'; \
+import os; \
+custom='/app/custom_model'; \
+if os.path.exists(custom) and os.listdir(custom): \
+    d['models']['classifier_model']=custom; \
+    print('[+] Custom classifier model detected at', custom); \
+json.dump(d, open(p,'w'), indent=2)"
+
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
-# Set model path for ModelManager to use
-ENV MODEL_PATH=/app/model/codesheriff
+# Run fully offline against the baked model cache.
+ENV HF_HOME=/app/model_cache
+ENV TRANSFORMERS_OFFLINE=1
+ENV HF_HUB_OFFLINE=1
 
 # No fixed ENTRYPOINT: this image runs both `semgrep ...` (isolated pipx venv)
 # and `python /app/src/*.py ...` (app venv). Callers must specify the full

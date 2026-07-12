@@ -1,9 +1,0 @@
-{
-  "run_id": "run_local-dev-run",
-  "gate_decision": {
-    "escalate_to_llm": false,
-    "gating_threshold_applied": 0.52
-  },
-  "findings": [],
-  "status": "SAFE"
-}

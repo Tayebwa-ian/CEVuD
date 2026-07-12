@@ -28,9 +28,14 @@ class GitRepoSource:
         git_url: Clonable URL, e.g. "https://github.com/org/repo.git".
         ref: Branch, tag, or commit SHA to check out. If None, the remote's
             default branch HEAD is used.
+        shallow: If True (default), clone with --depth 1. Set False when
+            the evaluation needs to reach arbitrary historical commits via
+            `git show <sha>` (e.g. CVEfixes, which checks out a
+            specific fix commit's parent to read the vulnerable code).
     """
     git_url: str
     ref: Optional[str] = None
+    shallow: bool = True
 
 
 @dataclass
@@ -77,6 +82,22 @@ class BenchmarkSample:
         source_code: Optional cached copy of the function source. If omitted,
             it is read from disk (file_path within the project root) at
             extraction time.
+        repo_url: Optional upstream repository URL (e.g. the GitHub repo a
+            CVEfixes row came from). Carried through for provenance/traceability.
+        commit_id: Optional VCS commit SHA the sample is associated with
+            (e.g. the fix commit in CVEfixes). Required by downstream stages
+            that want to trace a finding back to its exact upstream commit.
+        target_commit: Optional explicit commit SHA to check out when reading
+            this sample's source from a cloned repo. For a *vulnerable* sample
+            this is the parent of `commit_id` (the pre-fix version); for a
+            *safe* (post-fix) sample it is `commit_id` itself. When omitted,
+            the extractor derives the parent of `commit_id` (the historical
+            default for vulnerable-only manifests).
+        cve_id: Optional CVE identifier (e.g. "CVE-2021-1234").
+        cvss_score: Optional CVSS score for severity ranking/comparison.
+        fixed_code: Optional patched version of `source_code` (for patch
+            analysis / CodeSheriff-style fix comparison).
+        diff_with_context: Optional unified diff with surrounding context.
     """
     sample_id: str
     file_path: str
@@ -86,6 +107,13 @@ class BenchmarkSample:
     label: int
     vulnerability_type: Optional[str] = None
     source_code: Optional[str] = None
+    repo_url: Optional[str] = None
+    commit_id: Optional[str] = None
+    target_commit: Optional[str] = None
+    cve_id: Optional[str] = None
+    cvss_score: Optional[float] = None
+    fixed_code: Optional[str] = None
+    diff_with_context: Optional[str] = None
 
 
 @dataclass
@@ -128,10 +156,20 @@ class RawScoreRecord:
         severity_weight: Semgrep severity mapped to [0, 1] via config's
             `semgrep_severity_map` (0.0 if Semgrep produced no finding
             overlapping this sample's line range).
-        slm_score: CodeSheriff SLM classifier's vulnerability probability, [0, 1].
+        slm_score: local SLM classifier's vulnerability probability, [0, 1].
         vulnerability_type: Carried through from BenchmarkSample, for
             per-category reporting only.
         provenance: Repo/commit this sample was extracted from.
+        repo_url: Upstream repository URL, carried through from
+            BenchmarkSample (None for git_source projects whose URL lives
+            in `provenance` instead).
+        commit_id: VCS commit SHA associated with the sample (e.g. the fix
+            commit in CVEfixes). Carried through so downstream stages can
+            trace a finding back to its exact upstream commit.
+        cve_id: CVE identifier, carried through for traceability.
+        cvss_score: CVSS score, carried through for severity ranking.
+        fixed_code: Patched version of source_code, carried through.
+        diff_with_context: Unified diff with context, carried through.
     """
     sample_id: str
     project: str
@@ -143,6 +181,13 @@ class RawScoreRecord:
     slm_score: float
     vulnerability_type: Optional[str]
     provenance: RepoProvenance
+    repo_url: Optional[str] = None
+    commit_id: Optional[str] = None
+    target_commit: Optional[str] = None
+    cve_id: Optional[str] = None
+    cvss_score: Optional[float] = None
+    fixed_code: Optional[str] = None
+    diff_with_context: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

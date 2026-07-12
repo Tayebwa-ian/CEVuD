@@ -43,7 +43,7 @@ To ensure the local models evaluate code precisely as a developer wrote it, CEVu
 The pipeline first executes Semgrep utilizing a hybrid ruleset of community standards and proprietary taint-tracking rules. It maps untrusted data from source to sink, outputting a discrete severity score ($S_{\text{sev}} \in [0, 1]$).
 
 ### 4.3 Stage 2: Probabilistic Neural Gating (Local SLM)
-The AST-sliced snippet is passed to `jayansh21/codesheriff-bug-classifier`, a 125M-parameter sequence classifier fine-tuned on `microsoft/codebert-base`. It processes the snippet at zero marginal cost and outputs a semantic threat probability ($P_{\text{slm}} \in [0, 1]$).
+The AST-sliced snippet is passed to `jayansh21/codesheriff-bug-classifier`, a 125M-parameter sequence classifier fine-tuned on `microsoft/codebert-base`. It processes the snippet at zero marginal cost and outputs a semantic threat probability for the dedicated Security-Vulnerability class ($P_{\text{slm}} \in [0, 1]$).
 
 ### 4.4 The Linear Risk Equation
 The decision to escalate to the cloud LLM is governed by a Continuous Composite Risk Score ($R$):
@@ -58,16 +58,37 @@ Escalated snippets trigger an autonomous task-decomposition agent. Utilizing a l
 ## 5. Experimental Setup
 
 ### 5.1 Databases & Ground Truth
-To avoid the overfitting inherent in small, synthetic benchmarks, CEVuD is evaluated against thousands of real-world commits extracted from two major databases:
-1. **CVEfixes:** Links Common Vulnerabilities and Exposures (CVEs) to exact pre-fix (vulnerable) and post-fix (safe) open-source commits.
-2. **VUDENC:** A comprehensive dataset of real-world Python vulnerabilities and their secure refactorings.
 
-**Data Splitting:** Data is strictly grouped by project into Train, Validation, and Test splits. No project in the validation set exists in the test set, guaranteeing zero data leakage.
+To avoid the performance inflation inherent in small or synthetic benchmarks, CEVuD is evaluated against two established, publicly available vulnerability datasets. Critically, **neither dataset requires a bulk database download**. Both are accessed via the HuggingFace streaming API, enabling row-by-row ingestion without holding gigabytes in memory.
 
-### 5.2 Unbiased Parameter Tuning (Grid Search)
+#### Dataset A: VUDENC (`DetectVul/Vudenc`)
+VUDENC (Vulnerability Detection with Deep Learning on a Natural Codebase) contains real-world Python functions labeled at a **per-line granularity** across seven vulnerability categories: SQL Injection, Cross-Site Scripting (XSS), Command Injection, XSRF, Remote Code Execution, Path Disclosure, and Open Redirect.
+
+* **Source:** `DetectVul/Vudenc` on HuggingFace (~15,000 functions)
+* **Schema:** `raw_lines` (List[str]), `label` (List[int], per-line), `type` (List[str], vulnerability category)
+* **CEVuD Adaptation:** The `convert_vudenc.py` script joins raw lines back into complete function strings, collapses per-line labels into a single function-level label (1 if any line is flagged), and groups samples by vulnerability type as logical "projects" for data-leakage-free splitting.
+* **Why this dataset:** It covers seven distinct vulnerability topologies, ensuring the linear gate is not tuned to a single vulnerability pattern. Grouping by vulnerability type (rather than arbitrary project names) provides a principled train/val/test split.
+
+#### Dataset B: CVEfixes (`hitoshura25/cvefixes`)
+CVEfixes links public Common Vulnerabilities and Exposures (CVEs) directly to the open-source commits that introduced and fixed them. It is the largest and most reproducible real-world vulnerability dataset available.
+
+* **Source:** `hitoshura25/cvefixes` on HuggingFace (~50,000+ Python samples after language filtering)
+* **Schema:** `vulnerable_code` (str), `fixed_code` (str), `hash` (str, fix-commit SHA), `repo_url` (str), `cve_id` (str), `cwe_id` (str), `language` (str), `cvss2/cvss3_base_score` (float), `diff_with_context` (str)
+* **CEVuD Adaptation:** The `convert_cvefixes.py` script streams data, filters to Python, captures the fix-commit SHA from the `hash` column (as `commit_id`), and embeds the source code inline (bypassing the `git clone` step since the function body is pre-extracted). This makes evaluation dramatically faster and avoids dead repository links.
+* **Balanced labels (1:1).** Each row already contains the pre-fix function (`vulnerable_code`) and the post-fix function (`fixed_code`). The converter emits **both** as a matched pair: the pre-fix snippet is labeled `1` (vulnerable) and anchored to the diff's PRE-image line range (read from the *parent* of the fix commit), while the post-fix snippet is labeled `0` (safe) and anchored to the POST-image line range (pinned to the fix commit via `target_commit`). Treating the commit *before* the fix as vulnerable and the commit *after* the fix as safe therefore yields a naturally **balanced** dataset with no synthetic resampling — important for an unbiased F2 / recall evaluation.
+* **Alternative ID:** `dima806/fixedbugs` carries a similar schema and can be used as a drop-in alternative.
+* **Why this dataset:** CVEfixes provides direct CVE-to-commit traceability, making it the gold standard for measuring generalization across real-world Python projects. The sheer scale (thousands of diverse projects) prevents the gate weights from overfitting to any single codebase style.
+
+### 5.2 Data Splitting Strategy
+
+Data is split **by project** (not by sample) into Train (60%), Validation (20%), and Test (20%) partitions. The DatasetSplitter enforces that no project appears in more than one split. This prevents the model from learning project-specific patterns during validation-set tuning that would artificially inflate test-set performance.
+
+### 5.3 Unbiased Parameter Tuning (Grid Search)
+
 Parameters are not hand-picked. $W_1$, $W_2$, and $T_{\text{escalation}}$ are derived via an exhaustive 2D grid search **exclusively on the held-out validation split**, maximizing $F_{\beta}$ (with $\beta=2.0$ to heavily penalize false negatives). 
 
-### 5.3 Heuristic Safety Override
+### 5.4 Heuristic Safety Override
+
 To counteract neural blindspots, an override heuristic is applied: if $S_{\text{sev}} = 1.0$ (Critical Error) or $P_{\text{slm}} > 0.90$, escalation is forced regardless of $R$. The efficacy of this heuristic is proven via an ablation study on the test split.
 
 ---
@@ -75,9 +96,9 @@ To counteract neural blindspots, an override heuristic is applied: if $S_{\text{
 ## 6. Baselines & Comparative Evaluation
 CEVuD is evaluated against the following strict baselines to quantify its value:
 1. **Semgrep Only:** Escalates all static findings. (Baseline for legacy SAST).
-2. **CodeSheriff (SLM) Only:** Escalates purely on neural signals.
+2. **SLM (Local Classifier) Only:** Escalates purely on neural signals.
 3. **Always Escalate (Always-LLM):** The theoretical upper bound for Recall, but the absolute worst-case scenario for financial cost.
-4. **Semgrep OR CodeSheriff (OR-gate):** Naive combined trigger.
+4. **Semgrep OR SLM (OR-gate):** Naive combined trigger.
 5. **Logistic Regression Gate (Linearity Check):** A non-linear boundary fit on the validation split. Evaluated solely to prove whether the hand-defined linear formula is mathematically optimal.
 
 ---

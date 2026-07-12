@@ -5,7 +5,7 @@ This package is fully decoupled from the production pipeline (`triage_orchestrat
 `agent.py`). It exists to answer the scientific questions raised in review:
 
     1. How does the staged CEVuD gate compare against simpler baselines
-       (Semgrep-only, CodeSheriff-only, always-LLM, OR-gate, ablations)?
+       (Semgrep-only, SLM-only, always-LLM, OR-gate, ablations)?
     2. Were the gate weights/threshold tuned on a held-out validation split,
        and how sensitive are results to those choices?
     3. Is a linear gate justified, or would a learned non-linear boundary

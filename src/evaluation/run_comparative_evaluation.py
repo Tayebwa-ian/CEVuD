@@ -172,7 +172,7 @@ def _render_markdown_report(
     lines.append(f"- Split sizes: train={split_sizes['train']}, "
                   f"validation={split_sizes['validation']}, test={split_sizes['test']}\n")
     lines.append("| Project | Total | Vulnerable | Safe | Source |")
-    lines.append("|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|")
     for proj, s in dataset_summary["per_project"].items():
         lines.append(f"| {proj} | {s['total']} | {s['vulnerable']} | {s['safe']} | {s['source']} |")
     lines.append("")
@@ -181,18 +181,21 @@ def _render_markdown_report(
     lines.append(f"Selection metric: `{selection_metric}` "
                   f"(F-beta with beta weighting recall over precision — see metrics.py).\n")
     lines.append("| Strategy | Precision | Recall | F1 | " + selection_metric.upper() +
-                  " | Escalation rate |")
+                  " | Escalation rate | TRR | CSR |")
     lines.append("|---|---|---|---|---|---|")
     for name, res in strategy_results.items():
         m = res["aggregate"]
         lines.append(
             f"| {name} | {m['precision']:.3f} | {m['recall']:.3f} | {m['f1']:.3f} | "
-            f"{m[selection_metric]:.3f} | {m['escalation_rate']:.3f} |"
+            f"{m[selection_metric]:.3f} | {m['escalation_rate']:.3f} | {m['token_reduction_rate']:.3f} | {m['cost_savings_ratio']:.3f} |"
         )
     lines.append("")
     lines.append(
         "Escalation rate is the fraction of samples sent to the Stage 3 LLM — the pipeline's "
-        "direct cost proxy. `always_llm` is the recall/cost upper bound; `semgrep_only` and "
+        "direct cost proxy. TRR (token_reduction_rate) and CSR (cost_savings_ratio) are "
+        "reported as 1 - escalation_rate, i.e. the share of samples — and, under CEVuD's "
+        "uniform per-snippet token assumption, the share of tokens — that never reach the LLM. "
+        "`always_llm` is the recall/cost upper bound (TRR=0); `semgrep_only` and "
         "`codesheriff_only` are equivalent to the 'skip one stage' ablations requested in review "
         "(see gate_strategies.py docstring for why those pairs collapse to the same rule).\n"
     )
@@ -277,6 +280,16 @@ def main():
     parser.add_argument("--config", default="config.json", help="Path to the master config.json")
     parser.add_argument("--cache", default=None, help="Path to cache/reuse raw_scores.json (skips re-extraction if present)")
     parser.add_argument("--force-recompute", action="store_true", help="Ignore any existing raw score cache")
+    parser.add_argument("--inline", action="store_true",
+                        help="Score git_source projects from their embedded source_code/fixed_code "
+                             "instead of cloning the real repo. Skips every git clone — the "
+                             "fastest mode and the only one that runs offline / air-gapped.")
+    parser.add_argument("--weight-step", type=float, default=0.05,
+                        help="Grid-search step for weight_static in [0,1] (default 0.05 => 21x21 grid). "
+                             "Use 0.1 for a coarse 11x11 grid during quick iteration.")
+    parser.add_argument("--threshold-step", type=float, default=0.05,
+                        help="Grid-search step for escalation_threshold in [0,1] (default 0.05). "
+                             "Use 0.1 to coarsen the threshold axis.")
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -295,7 +308,10 @@ def main():
           f"{dataset_summary['total_samples']} samples")
 
     extractor = RawScoreExtractor(config_path=args.config)
-    records = extractor.extract(args.manifest, cache_path=cache_path, force_recompute=args.force_recompute)
+    records = extractor.extract(
+        args.manifest, cache_path=cache_path,
+        force_recompute=args.force_recompute, force_inline=args.inline,
+    )
 
     # --- Step 2: leakage-safe split ---
     split_assignment, split_strategy = _build_split_assignment(records, eval_config)
@@ -304,7 +320,21 @@ def main():
     print(f"[*] Split sizes: {split_sizes}")
 
     # --- Step 3: grid search + sensitivity plots (validation only) ---
-    grid_results, best = run_grid_search(splits["validation"], beta=beta, selection_metric=selection_metric)
+    # Coarsen the grid via the --weight-step / --threshold-step flags when
+    # iterating quickly; the default 0.05 gives a 21x21 grid. Both axes
+    # are cheap to sweep because every cell is a pure function over the
+    # *cached* (severity_weight, slm_score) arrays — no model/Semgrep
+    # calls happen inside the grid search itself.
+    def _grid_axis(step: float) -> List[float]:
+        step = max(1e-6, min(1.0, step))
+        return [round(i * step, 6) for i in range(int(round(1.0 / step)) + 1)]
+
+    weight_grid = _grid_axis(args.weight_step)
+    threshold_grid = _grid_axis(args.threshold_step)
+    grid_results, best = run_grid_search(
+        splits["validation"], beta=beta, selection_metric=selection_metric,
+        weight_grid=weight_grid, threshold_grid=threshold_grid,
+    )
     generate_all_sensitivity_plots(grid_results, best, selection_metric, eval_dir)
 
     tuned_gate_params = {

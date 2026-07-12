@@ -17,7 +17,10 @@ from vector_store import LocalVectorStore
 # can never silently drift apart.
 # ---------------------------------------------------------------------------
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "evaluation"))
-from .evaluation.gate_strategies import linear_weighted_gate
+try:
+    from evaluation.gate_strategies import linear_weighted_gate
+except ImportError:
+    from gate_strategies import linear_weighted_gate
 
 class TriageOrchestrator:
     """
@@ -219,6 +222,19 @@ class TriageOrchestrator:
         if not os.path.exists(semgrep_workspace_path) and os.path.exists(semgrep_filename):
             semgrep_workspace_path = semgrep_filename
 
+        # Fallback: the comparative evaluator writes Semgrep results under
+        # the evaluations subtree (e.g. evaluation_runs/.../). Reuse the
+        # most recent one so a Stage-2 run can consume evaluator output
+        # without re-running Semgrep, and so the triage the Stage-3
+        # agent reads is populated with the produced findings. Copy (do
+        # not move) to avoid disturbing the evaluator's own artifacts.
+        if not os.path.exists(semgrep_workspace_path):
+            found = self._find_semgrep_results(semgrep_filename)
+            if found:
+                os.makedirs(self.artifact_dir, exist_ok=True)
+                shutil.copy2(found, target_path)
+                semgrep_workspace_path = target_path
+
         if os.path.exists(semgrep_workspace_path):
             if not os.path.exists(target_path) or not os.path.samefile(semgrep_workspace_path, target_path):
                 print(f"[*] Moving {semgrep_workspace_path} to artifact directory: {self.artifact_dir}")
@@ -331,3 +347,49 @@ class TriageOrchestrator:
             
         print(f"[+] Successfully wrote decoupled Stage 2 triage report data to: {triage_output_path}")
         print(f"[+] Total findings: {len(findings)}, Escalated: {sum(1 for f in finding_reports if f['escalate'])}")
+
+
+    def _find_semgrep_results(self, semgrep_filename: str):
+        """Locate a Semgrep results file produced by the comparative
+        evaluator under the evaluations subtree, returning the most recent
+        match (or None). Used as a fallback so a Stage-2 run can
+        consume evaluator output without re-running Semgrep.
+        """
+        eval_sub = self.config["paths"].get("evaluations_subdir", "evaluation_runs")
+        eval_root = os.path.join(self.workspace_path, eval_sub)
+        if not os.path.isdir(eval_root):
+            return None
+        candidate = None
+        candidate_mtime = -1.0
+        for root, _dirs, files in os.walk(eval_root):
+            if semgrep_filename in files:
+                p = os.path.join(root, semgrep_filename)
+                m = os.path.getmtime(p)
+                if m > candidate_mtime:
+                    candidate, candidate_mtime = p, m
+        return candidate
+
+def _cli_main() -> None:
+    """Command-line entry point so the orchestrator can be run as
+    `python src/triage_orchestrator.py --workspace <dir> --config <cfg>`.
+
+    NOTE: directory exclusion is applied at the Stage 1 Semgrep layer
+    (see the CI workflow's `semgrep --exclude ...` invocation), not
+    here — this flag is accepted only so the documented/CI command
+    line keeps working.
+    """
+    import argparse
+    parser = argparse.ArgumentParser(description="CEVuD Stage 2: Local Triage & Gating")
+    parser.add_argument("--config", default="config.json", help="Path to config.json")
+    parser.add_argument("--workspace", default=".", help="Path to the target workspace/codebase")
+    parser.add_argument(
+        "--exclude-dirs", default="",
+        help="Comma-separated dirs excluded at the Semgrep layer (ignored here).",
+    )
+    args = parser.parse_args()
+    orchestrator = TriageOrchestrator(config_path=args.config, workspace_path=args.workspace)
+    orchestrator.process_pipeline()
+
+
+if __name__ == "__main__":
+    _cli_main()

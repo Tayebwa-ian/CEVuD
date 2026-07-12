@@ -2,7 +2,7 @@
 raw_score_extractor.py
 ========================
 The ONE module in this package that is allowed to be expensive: it runs
-Semgrep once per project and the CodeSheriff SLM once (batched) per project,
+Semgrep once per project and the local SLM classifier once (batched) per project,
 and persists exactly two numbers per labeled sample — `severity_weight` and
 `slm_score` — alongside the ground-truth label and repo provenance.
 
@@ -22,10 +22,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import subprocess
-from typing import List, Dict, Any
+import tempfile
+from typing import List, Dict, Any, Optional
 
-from schema import BenchmarkSample, ProjectManifest, RawScoreRecord
+from code_context import (
+    collect_module_imports,
+    collect_cross_file_context,
+    expand_to_function,
+    build_context_snippet,
+)
+
+from schema import BenchmarkSample, ProjectManifest, RawScoreRecord, RepoProvenance
 from repo_provider import resolve_project_workspace
 from benchmark_manifest import load_manifest
 
@@ -123,7 +133,7 @@ def _read_source_snippet(project_root: str, file_path: str, start_line: int, end
 
 
 class RawScoreExtractor:
-    """Runs Stage 1 (Semgrep) and Stage 2's SLM (CodeSheriff) once per
+    """Runs Stage 1 (Semgrep) and Stage 2's local SLM classifier once per
     project across an entire benchmark manifest, and caches the resulting
     per-sample raw scores.
 
@@ -147,54 +157,226 @@ class RawScoreExtractor:
             self._model_manager = ModelManager()
         return self._model_manager
 
-    def _extract_project(self, project: ProjectManifest) -> List[RawScoreRecord]:
-        """Extracts raw scores for every sample in a single project. Clones
-        the project's repo (if needed) for the duration of this call only —
-        see repo_provider.resolve_project_workspace for cleanup guarantees.
-        """
-        with resolve_project_workspace(project) as (local_path, provenance):
-            semgrep_output_path = os.path.join(local_path, "_eval_semgrep_results.json")
-            semgrep_results = _run_semgrep(local_path, semgrep_output_path, self.custom_rules_path)
-            severity_index = _build_severity_index(semgrep_results, local_path)
+    def _extract_project(self, project: ProjectManifest, force_inline: bool = False) -> List[RawScoreRecord]:
+        """Extracts raw scores for every sample in a single project.
 
-            # Resolve source code + severity for every sample BEFORE running
-            # the SLM, so inference can be batched in one call per project.
+        Two workspace shapes are supported:
+
+        * Real repo (git_source, or a local_source pointing at an actual
+          checkout): the repo is scanned wholesale and severity is matched
+          against each sample's real file_path / line range.
+
+        * Inline-snippet manifest (e.g. converted CVEfixes / VUDENC, where
+          every sample carries `source_code` but file_path is a synthetic
+          "inline_snippet.py" that does not exist on disk): we materialize
+          each snippet to its OWN .py file in a fresh temp dir and scan ONLY
+          that temp dir. This is critical — otherwise we would scan the entire
+          current working directory (the CEVuD repo itself) and never match
+          the synthetic path, silently forcing every sample's severity to
+          "NONE" and making the static stage contribute nothing.
+
+        `force_inline` lets callers evaluate a *git_source* manifest in
+        inline mode: every sample already embeds its `source_code`
+        (and `fixed_code`), so cloning the real repo is unnecessary. This
+        is the single biggest speedup — it skips every `git clone`,
+        network round-trip, and temp-dir cleanup, while still scoring the
+        exact code the converter extracted. It is the recommended mode for
+        fast iteration and for air-gapped / offline CI.
+        """
+        if project.git_source is not None and force_inline:
+            # No clone: synthesize a provenance record and score the embedded
+            # snippets directly (see _extract_inline).
+            provenance = RepoProvenance(
+                project=project.project,
+                git_url=project.git_source.git_url,
+                requested_ref=project.git_source.ref,
+                resolved_commit_sha=None,
+                cloned_at_utc=None,
+            )
+            return self._extract_inline(project, None, provenance)
+        if project.git_source is not None:
+            with resolve_project_workspace(project) as (local_path, provenance):
+                return self._extract_git_source(project, local_path, provenance)
+        with resolve_project_workspace(project) as (local_path, provenance):
+            return self._extract_inline(project, local_path, provenance)
+
+    # ------------------------------------------------------------------
+    # Git-source extraction: clone the REAL repo, check out the
+    # vulnerable commit, and give every stage genuine code context.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _git_show(repo_path: str, commit: str, rel_path: str) -> Optional[str]:
+        """Reads ``rel_path`` at ``commit`` via ``git show <commit>:<rel_path>``."""
+        try:
+            r = subprocess.run(
+                ["git", "-C", repo_path, "show", f"{commit}:{rel_path}"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if r.returncode == 0 and r.stdout != "":
+                return r.stdout
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _parent_commit(repo_path: str, commit: Optional[str]) -> Optional[str]:
+        """Returns the parent SHA of ``commit`` (the vulnerable version
+        precedes the fix). None if it cannot be resolved.
+        """
+        if not commit or commit == "unknown_commit":
+            return None
+        try:
+            r = subprocess.run(
+                ["git", "-C", repo_path, "rev-parse", f"{commit}^"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except Exception:
+            pass
+        return None
+
+    def _extract_inline(self, project, local_path, provenance) -> List[RawScoreRecord]:
+        """Local-source / self-contained snippet manifest (e.g. VUDENC):
+        materialize each ``source_code`` snippet and scan only it.
+        """
+        scan_root = tempfile.mkdtemp(prefix="cevud_inline_")
+        try:
+            snippet_rel: Dict[str, str] = {}
+            for sample in project.samples:
+                code = sample.source_code or ""
+                safe = re.sub(r"[^A-Za-z0-9_.-]", "_", sample.sample_id)
+                with open(os.path.join(scan_root, f"{safe}.py"), "w", encoding="utf-8") as f:
+                    f.write(code)
+                snippet_rel[sample.sample_id] = f"{safe}.py"
+            severity_index = _build_severity_index(
+                _run_semgrep(scan_root, os.path.join(scan_root, "_eval_semgrep_results.json"),
+                             self.custom_rules_path),
+                scan_root,
+            )
+            snippets, meta, severities = [], [], []
+            for sample in project.samples:
+                code = sample.source_code or ""
+                sev_path = snippet_rel.get(sample.sample_id, sample.file_path)
+                sev_start, sev_end = 1, max(len(code.splitlines()), 1)
+                severities.append(_match_severity(
+                    severity_index, sev_path, sev_start, sev_end, self.severity_map))
+                snippets.append(code)
+                meta.append(sample)
+            return self._finalize(project, meta, severities, snippets, provenance)
+        finally:
+            shutil.rmtree(scan_root, ignore_errors=True)
+
+    def _extract_git_source(self, project, local_path, provenance) -> List[RawScoreRecord]:
+        """CVEfixes-style git_source manifest.
+
+        For each sample we clone the REAL repo, check out the PARENT of
+        the fix commit (the vulnerable version), read the full file at
+        that commit, AST-expand to the enclosing function, and pull in
+        the module imports + best-effort cross-file context. Semgrep is
+        run over the materialized REAL files (at their real relative
+        paths, so cross-file taint works), and the SLM/LLM receive
+        the complete function + imports + cross-file source.
+        """
+        scan_root = tempfile.mkdtemp(prefix="cevud_ctx_")
+        try:
             snippets: List[str] = []
-            sample_meta: List[BenchmarkSample] = []
-            severities: List[str] = []
+            meta: List[BenchmarkSample] = []
+            sev_info: Dict[str, tuple] = {}
 
             for sample in project.samples:
-                code = sample.source_code or _read_source_snippet(
-                    local_path, sample.file_path, sample.start_line, sample.end_line
+                fp = sample.file_path
+                # A sample may pin an exact commit to check out (e.g. a *safe*
+                # post-fix sample targets the fix commit itself). Otherwise we
+                # fall back to the historical default: the parent of the fix
+                # commit, i.e. the vulnerable (pre-fix) version.
+                vuln_commit = sample.target_commit or (
+                    self._parent_commit(local_path, sample.commit_id) or sample.commit_id
                 )
-                severity = _match_severity(
-                    severity_index, sample.file_path, sample.start_line, sample.end_line, self.severity_map
-                )
-                snippets.append(code)
-                sample_meta.append(sample)
-                severities.append(severity)
+                content = self._git_show(local_path, vuln_commit, fp) if vuln_commit else None
+                if content is None and sample.commit_id:
+                    content = self._git_show(local_path, sample.commit_id, fp)
+                use_inline = content is None
+                if use_inline:
+                    content = sample.source_code or ""
 
-            print(f"[*] Running batched SLM inference on {len(snippets)} samples for '{project.project}' ...")
-            slm_scores = self._get_model_manager().get_classifier_inference(snippets)
+                # Materialize the full file at its REAL relative path.
+                real_parts = fp.replace("\\", "/").split("/")
+                fpath = os.path.join(scan_root, *real_parts)
+                os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                with open(fpath, "w", encoding="utf-8") as f:
+                    f.write(content)
 
-            records = []
-            for sample, severity, slm_score in zip(sample_meta, severities, slm_scores):
-                records.append(RawScoreRecord(
-                    sample_id=sample.sample_id,
-                    project=project.project,
-                    file_path=sample.file_path,
-                    function_name=sample.function_name,
-                    label=sample.label,
-                    severity=severity,
-                    severity_weight=self.severity_map.get(severity, 0.0),
-                    slm_score=round(float(slm_score), 4),
-                    vulnerability_type=sample.vulnerability_type,
-                    provenance=provenance,
-                ))
-            return records
+                if use_inline:
+                    sev_path = os.path.relpath(fpath, scan_root).replace("\\", "/")
+                    func_start, func_end = 1, max(len(content.splitlines()), 1)
+                    slm_code = content
+                else:
+                    imports = collect_module_imports(content)
+                    cross = collect_cross_file_context(
+                        content, fp, local_path,
+                        read_file=lambda rel: self._git_show(local_path, vuln_commit, rel),
+                    )
+                    for mrel, msrc in cross.items():
+                        mparts = mrel.replace("\\", "/").split("/")
+                        mpath = os.path.join(scan_root, *mparts)
+                        os.makedirs(os.path.dirname(mpath), exist_ok=True)
+                        with open(mpath, "w", encoding="utf-8") as f:
+                            f.write(msrc)
+                    func_start, func_end = expand_to_function(content, sample.start_line)
+                    slm_code = build_context_snippet(
+                        content, (func_start, func_end), imports, cross
+                    )
+                    sev_path = fp.replace("\\", "/")
+
+                sev_info[sample.sample_id] = (sev_path, func_start, func_end)
+                snippets.append(slm_code)
+                meta.append(sample)
+
+            severity_index = _build_severity_index(
+                _run_semgrep(scan_root, os.path.join(scan_root, "_eval_semgrep_results.json"),
+                             self.custom_rules_path),
+                scan_root,
+            )
+            severities: List[str] = []
+            for sample in meta:
+                sev_path, fs, fe = sev_info[sample.sample_id]
+                severities.append(_match_severity(
+                    severity_index, sev_path, fs, fe, self.severity_map))
+            return self._finalize(project, meta, severities, snippets, provenance)
+        finally:
+            shutil.rmtree(scan_root, ignore_errors=True)
+
+    def _finalize(self, project, meta, severities, snippets, provenance) -> List[RawScoreRecord]:
+        """Batched SLM inference + RawScoreRecord assembly (shared by both paths)."""
+        print(f"[*] Running batched SLM inference on {len(snippets)} samples for '{project.project}' ...")
+        slm_scores = self._get_model_manager().get_classifier_inference(snippets) if snippets else []
+        records = []
+        for sample, severity, slm_score in zip(meta, severities, slm_scores):
+            records.append(RawScoreRecord(
+                sample_id=sample.sample_id,
+                project=project.project,
+                file_path=sample.file_path,
+                function_name=sample.function_name,
+                label=sample.label,
+                severity=severity,
+                severity_weight=self.severity_map.get(severity, 0.0),
+                slm_score=round(float(slm_score), 4),
+                vulnerability_type=sample.vulnerability_type,
+                repo_url=sample.repo_url,
+                commit_id=sample.commit_id,
+                cve_id=sample.cve_id,
+                cvss_score=sample.cvss_score,
+                fixed_code=sample.fixed_code,
+                diff_with_context=sample.diff_with_context,
+                provenance=provenance,
+            ))
+        return records
 
     def extract(
-        self, manifest_path: str, cache_path: str = None, force_recompute: bool = False
+        self, manifest_path: str, cache_path: str = None, force_recompute: bool = False,
+        force_inline: bool = False,
     ) -> List[RawScoreRecord]:
         """Extracts (or loads cached) raw scores for every sample across
         every project in the manifest.
@@ -207,6 +389,11 @@ class RawScoreExtractor:
             force_recompute: If True, ignores any existing cache and
                 re-extracts everything (e.g. after updating the SLM model
                 or the custom Semgrep rules).
+            force_inline: If True, *git_source* projects are scored from
+                their embedded `source_code` / `fixed_code` instead of
+                cloning the real repo. This skips every `git clone` and is
+                the recommended mode for fast iteration and offline CI (see
+                `_extract_project`).
 
         Returns:
             List[RawScoreRecord]: One record per labeled sample, across all projects.
@@ -221,7 +408,7 @@ class RawScoreExtractor:
         all_records: List[RawScoreRecord] = []
         for i, project in enumerate(projects, start=1):
             print(f"\n=== [{i}/{len(projects)}] Extracting raw scores for project: {project.project} ===")
-            all_records.extend(self._extract_project(project))
+            all_records.extend(self._extract_project(project, force_inline=force_inline))
 
         if cache_path:
             os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)

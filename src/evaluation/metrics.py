@@ -83,6 +83,15 @@ def compute_metrics(predictions: List[bool], labels: List[int], beta: float = 2.
     escalations = tp + fp
     escalation_rate = escalations / total if total > 0 else 0.0
 
+    # Cost KPIs (the paper's TRR / CSR). Under CEVuD's assumption that
+    # each escalated snippet is a function-level unit of roughly uniform token
+    # cost, the fraction of samples NOT sent to the LLM equals the fraction
+    # of tokens saved. If real per-sample token counts ever become available
+    # they should replace `escalation_rate` here; until then this is the
+    # standard, defensible proxy used throughout the paper.
+    token_reduction_rate = round(1.0 - escalation_rate, 4)
+    cost_savings_ratio = round(1.0 - escalation_rate, 4)
+
     return {
         "confusion_matrix": cm,
         "precision": round(precision, 4),
@@ -92,6 +101,8 @@ def compute_metrics(predictions: List[bool], labels: List[int], beta: float = 2.
         "f1": round(f1, 4),
         f"f{beta:g}": round(f_beta, 4),
         "escalation_rate": round(escalation_rate, 4),
+        "token_reduction_rate": token_reduction_rate,
+        "cost_savings_ratio": cost_savings_ratio,
         "total_samples": total,
     }
 

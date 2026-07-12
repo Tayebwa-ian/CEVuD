@@ -92,6 +92,44 @@ def unit_test_config(repository_root) -> str:
         json.dump(config_data, f, indent=2)
     return str(config_file)
 
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-e2e",
+        action="store_true",
+        default=False,
+        help="Run end-to-end pipeline tests (requires real models, semgrep, and disk access)"
+    )
+
+
+def _semgrep_available() -> bool:
+    """Returns True if the `semgrep` binary is resolvable on PATH."""
+    from shutil import which
+    return which("semgrep") is not None
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip the heavy E2E integration tests unless --run-e2e is supplied.
+
+    When --run-e2e IS supplied but the `semgrep` binary is missing, the
+    tests are skipped rather than erroring out, so the suite stays green in
+    environments that do not have the static analyzer installed.
+    """
+    if config.getoption("--run-e2e"):
+        if not _semgrep_available():
+            skip_no_semgrep = pytest.mark.skip(
+                reason="semgrep binary not found on PATH; required for E2E tests"
+            )
+            for item in items:
+                if item.name.startswith("test_e2e"):
+                    item.add_marker(skip_no_semgrep)
+        return
+
+    skip_e2e = pytest.mark.skip(reason="E2E test (pass --run-e2e to execute)")
+    for item in items:
+        if item.name.startswith("test_e2e"):
+            item.add_marker(skip_e2e)
+
 @pytest.fixture(scope="session")
 def gold_standard_path(repository_root) -> str:
     """Resolves your absolute local gold standard validation benchmark ledger asset."""

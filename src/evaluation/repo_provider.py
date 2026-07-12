@@ -45,9 +45,16 @@ class RepoCloneError(RuntimeError):
 
 import time
 
-def _run_git(args, cwd=None, retries=3, timeout=300) -> subprocess.CompletedProcess:
+def _run_git(args, cwd=None, retries=3, timeout=300, on_retry=None) -> subprocess.CompletedProcess:
     """Runs a git subcommand with retries, timeout, and exponential backoff.
-    Raises RepoCloneError with full stderr on failure."""
+    Raises RepoCloneError with full stderr on failure.
+
+    Args:
+        on_retry: Optional zero-argument callable invoked *before* each
+            retry's backoff sleep. Used to clean up partial state a failed
+            attempt may have left behind (e.g. a half-created clone directory),
+            so that a transient failure is recoverable instead of fatal.
+    """
     last_err = ""
     for attempt in range(1, retries + 1):
         try:
@@ -61,17 +68,22 @@ def _run_git(args, cwd=None, retries=3, timeout=300) -> subprocess.CompletedProc
             if result.returncode == 0:
                 return result
             last_err = result.stderr
-            
+
             # Fast fail for unrecoverable errors (e.g., repository not found or access denied)
             if "not found" in last_err.lower() or "fatal: could not read Username" in last_err:
                 break
-                
+
         except subprocess.TimeoutExpired as e:
             last_err = f"Timeout after {timeout}s: {e}"
         except Exception as e:
             last_err = str(e)
 
         if attempt < retries:
+            if on_retry is not None:
+                try:
+                    on_retry()
+                except Exception:
+                    pass
             backoff = 2 ** attempt
             print(f"[!] git {' '.join(args)} failed (attempt {attempt}/{retries}). Retrying in {backoff}s...")
             time.sleep(backoff)
@@ -103,14 +115,38 @@ def clone_repo(git_url: str, ref: str = None, dest_dir: str = None, shallow: boo
     """
     if dest_dir is None:
         dest_dir = tempfile.mkdtemp(prefix="cevud_repo_")
+    else:
+        # Defensive: a leftover clone directory from a previous failed attempt
+        # (same explicit path) must not poison this one, since `git clone`
+        # refuses to clone into an existing, non-empty directory.
+        if os.path.exists(dest_dir):
+            shutil.rmtree(dest_dir, ignore_errors=True)
 
     clone_args = ["clone"]
     if shallow and ref is None:
+        # Fast shallow clone for "just give me the tip" use cases.
         clone_args += ["--depth", "1"]
+    elif not shallow:
+        # Partial clone: full history (so `git show <sha>` / `rev-parse
+        # <sha>^` reach arbitrary historical commits) but blobs are
+        # fetched on demand. This is what CVEfixes needs without
+        # downloading the entire working tree up front.
+        clone_args += ["--filter", "blob:none"]
     clone_args += [git_url, dest_dir]
 
     print(f"[*] Cloning {git_url} into {dest_dir} ...")
-    _run_git(clone_args)
+
+    # `git clone` creates the destination directory eagerly, so a clone that
+    # fails partway (network drop, auth prompt, rate limit) leaves a
+    # non-empty directory behind. On the next retry `git clone` then aborts
+    # with "destination path already exists and is not an empty directory"
+    # — turning a transient failure into a fatal one. Remove any partial
+    # clone before each retry so the attempt can actually succeed.
+    def _cleanup_partial_clone() -> None:
+        if os.path.exists(dest_dir):
+            shutil.rmtree(dest_dir, ignore_errors=True)
+
+    _run_git(clone_args, on_retry=_cleanup_partial_clone)
 
     if ref is not None:
         # Full history may be required to reach an arbitrary ref/SHA; fetch
@@ -165,7 +201,9 @@ def resolve_project_workspace(project: ProjectManifest) -> Iterator[Tuple[str, R
     git_source = project.git_source
     local_path = None
     try:
-        local_path = clone_repo(git_source.git_url, ref=git_source.ref)
+        local_path = clone_repo(
+            git_source.git_url, ref=git_source.ref, shallow=git_source.shallow
+        )
         resolved_sha = resolve_commit_sha(local_path)
         provenance = RepoProvenance(
             project=project.project,

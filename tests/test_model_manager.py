@@ -127,3 +127,42 @@ def test_model_manager_empty_batch_returns_empty_list(mock_config):
     manager = ModelManager()
     probs = manager.get_classifier_inference([])
     assert probs == []
+
+
+def test_model_manager_multilabel_scoring(mock_config):
+    """A multi-label vulnerability classifier scores P_slm as
+    ``max(1 - P(safe), max_i P(CWE_i))`` -- the per-CWE signal,
+    not the (often-saturated) ``safe`` class, drives the gate.
+
+    NOTE: ``_configure_scoring`` runs inside ``get_classifier_inference``
+    (not ``get_classifier``), so the model's forward output must be wired
+    before the inference call, and the scoring-mode assertions come after it.
+    """
+    manager = ModelManager()
+    manager._scoring_mode = None  # force auto-detection
+
+    fake_model = MagicMock()
+    fake_model.config.id2label = {
+        0: "safe", 1: "CWE-79", 2: "CWE-89",  # 31-class multi-label style
+    }
+    # Row 0 = vulnerable: P(safe)=0.27 -> 1-P=0.73, CWE=0.95 -> P_slm = max(0.73, 0.95) = 0.95
+    # Row 1 = safe:      P(safe)=0.99 -> 1-P=0.007, CWE=0.007 -> P_slm = 0.007
+    # logit for prob p is ln(p/(1-p)); -1 -> 0.269, 3 -> 0.9526, 5 -> 0.9933, -5 -> 0.0067
+    logits = torch.tensor([[-1.0, 3.0, -5.0], [5.0, -5.0, -5.0]])
+
+    class _FakeTok:
+        def __call__(self, texts, **kw):
+            return {"input_ids": torch.zeros((len(texts), 2), dtype=torch.long)}
+
+    with patch("transformers.AutoTokenizer.from_pretrained", return_value=_FakeTok()), \
+         patch("transformers.AutoModelForSequenceClassification.from_pretrained", return_value=fake_model):
+        tokenizer, model = manager.get_classifier()
+        # Force the model forward path to return our crafted logits.
+        model.return_value = MagicMock(logits=logits)
+        probs = manager.get_classifier_inference(["x = 1", "y = 2"])
+
+    assert manager._scoring_mode == "multilabel"
+    assert manager._safe_class_idx == 0
+    # vulnerable row escalates, safe row stays near zero
+    assert probs[0] == pytest.approx(0.95, abs=1e-2)
+    assert probs[1] == pytest.approx(0.007, abs=1e-2)

@@ -1,6 +1,6 @@
 # CEVuD: Cost-Effective Vulnerability Detection
 
-CEVuD is a Python-based security triage pipeline designed to integrate into large-scale CI/CD environments. It combines static analysis (Semgrep), local semantic machine learning (CodeBERT), and optional frontier LLM-based remediation synthesis.
+CEVuD is a Python-based security triage pipeline designed to integrate into large-scale CI/CD environments. It combines static analysis (Semgrep), local semantic machine learning (a small vulnerability classifier), and optional frontier LLM-based remediation synthesis.
 
 The system is designed for **cost-aware code review workflows**. Running a frontier LLM (like GPT-4 or Claude) on every single file change is prohibitively expensive and slow. CEVuD solves this by using a zero-marginal-cost edge compute layer (a "gate") to filter out false positives and low-risk code, escalating only the highest-risk findings to the LLM.
 
@@ -17,7 +17,7 @@ The pipeline operates in three distinct stages:
 
 2. **Stage 2: Local Triage & Gating (The "Smart Gate")**
    - Parses the target workspace into an Abstract Syntax Tree (AST) to extract pristine function blocks corresponding to Semgrep findings.
-   - Uses a local CodeBERT sequence classifier (`jayansh21/codesheriff-bug-classifier`) to output a probabilistic threat score (`P_slm`).
+    - Uses a local CodeBERT sequence classifier (`jayansh21/codesheriff-bug-classifier`, fine-tuned on `microsoft/codebert-base`) to output a probabilistic threat score (`P_slm`).
    - Calculates a combined risk score: `R = (W_1 * S_sev) + (W_2 * P_slm)`.
    - **Escalates** the finding to Stage 3 if `R` exceeds a configurable threshold, or if critical static/semantic override thresholds are triggered.
 
@@ -38,7 +38,8 @@ The pipeline operates in three distinct stages:
 - `src/diff_parser.py`: Analyzes Git diffs for PR-based incremental scanning.
 
 ### Core Support & Models
-- `src/model_manager.py`: Centralizes HuggingFace model loading and local inference (CodeSheriff and embeddings).
+- `src/model_manager.py`: Centralizes HuggingFace model loading and local inference (CodeSheriff and the CodeBERT embeddings).
+- `src/training/`: Few-shot fine-tuning pipeline for a custom CodeBERT vulnerability classifier (dataset builder, trainer, evaluator, CLI).
 - `src/vector_store.py`: Manages SQLite storage for AST-parsed function blocks and their dense vectors.
 - `src/llm_factory.py`: Interface wrapper for calling external frontier LLMs.
 
@@ -89,13 +90,36 @@ python src/agent.py --workspace /path/to/target --config config.json
 ### 3. Evaluating the Model (Benchmarking)
 If you want to prove the model's token reduction rate on real datasets:
 ```bash
-# Convert a dataset
-python src/scripts/convert_cvefixes.py --db cvefixes.db --output benchmark_manifest.json
+# Convert a dataset (local `save_to_disk` artifact, no network needed)
+python src/scripts/convert_cvefixes.py --local-dir ./cvefixes_dataset --output benchmark_manifest.json
 
 # Run evaluation
 python src/evaluation/run_comparative_evaluation.py --manifest benchmark_manifest.json --config config.json
 ```
 *(Results and sensitivity plots are output to `workspace_storage/evaluations/`)*
+
+> **Balanced datasets:** `convert_cvefixes.py` emits a **pair** of samples for every
+> CVEfixes row — the **pre-fix** function as a `label=1` (vulnerable) sample and the
+> **post-fix** function as a `label=0` (safe) sample. Because each row carries both a
+> `vulnerable_code` and a `fixed_code` snippet, this yields a naturally **1:1 balanced**
+> dataset with no extra sampling. VUDENC, by contrast, contains vulnerable functions
+> only, so it is inherently unbalanced — run it alongside the balanced CVEfixes set when
+> you need a negative class.
+
+---
+
+## 🧪 Tests
+
+Unit and integration tests live in `tests/`. Run them with:
+
+```bash
+python -m pytest tests/            # fast unit tests (no external binaries)
+python -m pytest tests/ --run-e2e  # also runs the live end-to-end pipeline
+```
+
+The `--run-e2e` flag additionally requires `semgrep` to be installed (see
+`USAGE.md`). When `--run-e2e` is supplied but `semgrep` is missing, those tests
+are skipped automatically rather than failing.
 
 ---
 
