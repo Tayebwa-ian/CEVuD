@@ -43,7 +43,10 @@ To ensure the local models evaluate code precisely as a developer wrote it, CEVu
 The pipeline first executes Semgrep utilizing a hybrid ruleset of community standards and proprietary taint-tracking rules. It maps untrusted data from source to sink, outputting a discrete severity score ($S_{\text{sev}} \in [0, 1]$).
 
 ### 4.3 Stage 2: Probabilistic Neural Gating (Local SLM)
-The AST-sliced snippet is passed to `jayansh21/codesheriff-bug-classifier`, a 125M-parameter sequence classifier fine-tuned on `microsoft/codebert-base`. It processes the snippet at zero marginal cost and outputs a semantic threat probability for the dedicated Security-Vulnerability class ($P_{\text{slm}} \in [0, 1]$).
+The AST-sliced snippet is passed to a lightweight **CodeBERT-based sequence classifier** ($P_{\text{slm}} \in [0, 1]$) that runs at zero marginal cost on the edge. CEVuD ships with two interchangeable options, both loading via `AutoModelForSequenceClassification` with no code change:
+
+* **Default (pretrained):** `jayansh21/codesheriff-bug-classifier`, a 125M-parameter classifier fine-tuned on `microsoft/codebert-base`.
+* **Custom (this work):** a CodeBERT classifier **fine-tuned by CEVuD** on the CVEfixes corpus (`src/training/`). The architecture is the standard `RobertaForSequenceClassification` head on `microsoft/codebert-base` — a `pooler` (`dense` 768→768, `tanh`) followed by a `classifier` (`dense` 768→768 → `out_proj` 768→2); the vulnerable-class probability is `softmax(logits)[:, 1]`. Training uses class-weighted cross-entropy, project-level stratified splits, and early stopping on validation loss (see `MODEL_CARD.md`). This custom model is the artifact evaluated in Section 5.
 
 ### 4.4 The Linear Risk Equation
 The decision to escalate to the cloud LLM is governed by a Continuous Composite Risk Score ($R$):
@@ -59,25 +62,27 @@ Escalated snippets trigger an autonomous task-decomposition agent. Utilizing a l
 
 ### 5.1 Databases & Ground Truth
 
-To avoid the performance inflation inherent in small or synthetic benchmarks, CEVuD is evaluated against two established, publicly available vulnerability datasets. Critically, **neither dataset requires a bulk database download**. Both are accessed via the HuggingFace streaming API, enabling row-by-row ingestion without holding gigabytes in memory.
+To avoid the performance inflation inherent in small or synthetic benchmarks, CEVuD is built and evaluated against two established, publicly available vulnerability datasets. Critically, **neither dataset requires a bulk database download** — both are accessed via the HuggingFace streaming API, enabling row-by-row ingestion without holding gigabytes in memory.
+
+**Two-corpora workflow.** CVEfixes develops the small Stage-2 classifier end-to-end: it is the corpus for the model's **training**, **validation** (early-stopping / best-checkpoint selection), and its own **evaluation** (`convert_cvefixes.py` → `benchmark_manifest_cvefixes.json`). VUDENC is then the corpus for the **gate study** — the comparative evaluation of the full CEVuD pipeline (Semgrep + the CVEfixes-trained classifier + the gating strategies) run by `src/evaluation/` (`convert_vudenc.py` → `benchmark_manifest_vudenc.json`). Within CVEfixes, train/validation/test are split by project so no project leaks across splits; VUDENC additionally provides an independently curated corpus for the gate study. Both manifests share an identical schema (see `DATASET_CARD.md`), so the training and evaluation harnesses are interchangeable.
 
 #### Dataset A: VUDENC (`DetectVul/Vudenc`)
 VUDENC (Vulnerability Detection with Deep Learning on a Natural Codebase) contains real-world Python functions labeled at a **per-line granularity** across seven vulnerability categories: SQL Injection, Cross-Site Scripting (XSS), Command Injection, XSRF, Remote Code Execution, Path Disclosure, and Open Redirect.
 
 * **Source:** `DetectVul/Vudenc` on HuggingFace (~15,000 functions)
 * **Schema:** `raw_lines` (List[str]), `label` (List[int], per-line), `type` (List[str], vulnerability category)
-* **CEVuD Adaptation:** The `convert_vudenc.py` script joins raw lines back into complete function strings, collapses per-line labels into a single function-level label (1 if any line is flagged), and groups samples by vulnerability type as logical "projects" for data-leakage-free splitting.
-* **Why this dataset:** It covers seven distinct vulnerability topologies, ensuring the linear gate is not tuned to a single vulnerability pattern. Grouping by vulnerability type (rather than arbitrary project names) provides a principled train/val/test split.
+* **CEVuD Adaptation (evaluation set):** The `convert_vudenc.py` script joins raw lines back into complete function strings, collapses per-line labels into a single function-level label (1 if any line is flagged), and groups samples by vulnerability type as logical "projects" so the gate study's splits are leakage-free. VUDENC ships no repository or commit metadata, so each sample embeds its `source_code` inline (`local_source`) and the provenance fields (`repo_url`, `commit_id`, `cve_id`, `cvss_score`, `diff_with_context`, `fixed_code`) are emitted empty for schema consistency with the CVEfixes manifest.
+* **Why this dataset:** It covers seven distinct vulnerability topologies, ensuring the linear gate is not tuned to a single vulnerability pattern. Because VUDENC is held out from classifier training, it is the corpus on which the gate's generalization (RQ3) is measured.
 
 #### Dataset B: CVEfixes (`hitoshura25/cvefixes`)
 CVEfixes links public Common Vulnerabilities and Exposures (CVEs) directly to the open-source commits that introduced and fixed them. It is the largest and most reproducible real-world vulnerability dataset available.
 
 * **Source:** `hitoshura25/cvefixes` on HuggingFace (~50,000+ Python samples after language filtering)
 * **Schema:** `vulnerable_code` (str), `fixed_code` (str), `hash` (str, fix-commit SHA), `repo_url` (str), `cve_id` (str), `cwe_id` (str), `language` (str), `cvss2/cvss3_base_score` (float), `diff_with_context` (str)
-* **CEVuD Adaptation:** The `convert_cvefixes.py` script streams data, filters to Python, captures the fix-commit SHA from the `hash` column (as `commit_id`), and embeds the source code inline (bypassing the `git clone` step since the function body is pre-extracted). This makes evaluation dramatically faster and avoids dead repository links.
+* **CEVuD Adaptation (training set):** The `convert_cvefixes.py` script streams data, filters to Python, captures the fix-commit SHA from the `hash` column (as `commit_id`), and organises each repository as a `git_source` project so the evaluation harness can clone it and read the real vulnerable function plus context. The function body is also embedded inline as a clone-failure fallback. This makes training fast and reproducible while preserving full provenance.
 * **Balanced labels (1:1).** Each row already contains the pre-fix function (`vulnerable_code`) and the post-fix function (`fixed_code`). The converter emits **both** as a matched pair: the pre-fix snippet is labeled `1` (vulnerable) and anchored to the diff's PRE-image line range (read from the *parent* of the fix commit), while the post-fix snippet is labeled `0` (safe) and anchored to the POST-image line range (pinned to the fix commit via `target_commit`). Treating the commit *before* the fix as vulnerable and the commit *after* the fix as safe therefore yields a naturally **balanced** dataset with no synthetic resampling — important for an unbiased F2 / recall evaluation.
 * **Alternative ID:** `dima806/fixedbugs` carries a similar schema and can be used as a drop-in alternative.
-* **Why this dataset:** CVEfixes provides direct CVE-to-commit traceability, making it the gold standard for measuring generalization across real-world Python projects. The sheer scale (thousands of diverse projects) prevents the gate weights from overfitting to any single codebase style.
+* **Why this dataset:** CVEfixes provides direct CVE-to-commit traceability, making it the gold standard for training a real-world Python vulnerability classifier. The sheer scale (thousands of diverse projects) prevents the custom model from overfitting to any single codebase style. It is the training corpus; generalization is then measured separately on VUDENC (Section 5.1, Dataset A).
 
 ### 5.2 Data Splitting Strategy
 

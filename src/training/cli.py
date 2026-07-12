@@ -47,6 +47,18 @@ def _build_parser() -> argparse.ArgumentParser:
     bd.add_argument("--max-samples-per-cwe", type=int, default=None, help="Max samples per CWE type")
     bd.add_argument("--max-total", type=int, default=None, help="Hard cap on total samples")
     bd.add_argument("--sample-cap-seed", type=int, default=42, help="Seed for sample capping shuffle")
+    bd.add_argument("--keep-contradictory", action="store_true",
+                    help="Keep (vuln, safe) pairs with identical text (NOT recommended).")
+    bd.add_argument("--min-code-lines", type=int, default=2,
+                    help="Drop enriched samples with fewer code-signal lines (default 2).")
+    bd.add_argument("--no-chunk", action="store_true",
+                    help="Disable chunking; train on whole functions instead of uniform windows.")
+    bd.add_argument("--chunk-max-lines", type=int, default=64,
+                    help="Max lines per training chunk (default 64).")
+    bd.add_argument("--chunk-overlap", type=int, default=8,
+                    help="Overlapping lines between consecutive chunks (default 8).")
+    bd.add_argument("--chunk-min-code-lines", type=int, default=2,
+                    help="Drop chunks with fewer code-signal lines (default 2).")
 
     # ── train ───────────────────────────────────────────────────────────────
     tr = sub.add_parser("train", help="Fine-tune CodeBERT on the training split")
@@ -59,6 +71,8 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Stop after N epochs without val-loss improvement (default 3).")
     tr.add_argument("--early-stopping-threshold", type=float, default=None,
                     help="Min val-loss improvement to count as progress (default 0.0).")
+    tr.add_argument("--allow-noisy-data", action="store_true",
+                    help="Train even if the dataset contains contradictory samples.")
 
     # ── evaluate ────────────────────────────────────────────────────────────
     ev = sub.add_parser("evaluate", help="Evaluate a trained model on the test split")
@@ -82,6 +96,20 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Stop after N epochs without val-loss improvement (default 3).")
     ra.add_argument("--early-stopping-threshold", type=float, default=None,
                     help="Min val-loss improvement to count as progress (default 0.0).")
+    ra.add_argument("--keep-contradictory", action="store_true",
+                    help="Keep (vuln, safe) pairs with identical text (NOT recommended).")
+    ra.add_argument("--min-code-lines", type=int, default=2,
+                    help="Drop enriched samples with fewer code-signal lines (default 2).")
+    ra.add_argument("--no-chunk", action="store_true",
+                    help="Disable chunking; train on whole functions instead of uniform windows.")
+    ra.add_argument("--chunk-max-lines", type=int, default=64,
+                    help="Max lines per training chunk (default 64).")
+    ra.add_argument("--chunk-overlap", type=int, default=8,
+                    help="Overlapping lines between consecutive chunks (default 8).")
+    ra.add_argument("--chunk-min-code-lines", type=int, default=2,
+                    help="Drop chunks with fewer code-signal lines (default 2).")
+    ra.add_argument("--allow-noisy-data", action="store_true",
+                    help="Train even if the dataset contains contradictory samples.")
 
     return p
 
@@ -106,6 +134,12 @@ def cmd_build_dataset(args, cfg: TrainingConfig) -> None:
         max_samples_per_cwe=args.max_samples_per_cwe,
         max_total=max_total,
         sample_cap_seed=args.sample_cap_seed,
+        keep_contradictory=args.keep_contradictory,
+        min_code_lines=args.min_code_lines,
+        chunk_data=not args.no_chunk,
+        chunk_max_lines=args.chunk_max_lines,
+        chunk_overlap=args.chunk_overlap,
+        chunk_min_code_lines=args.chunk_min_code_lines,
     )
 
 
@@ -121,6 +155,7 @@ def cmd_train(args, cfg: TrainingConfig) -> None:
         cfg.early_stopping_patience = args.early_stopping_patience
     if args.early_stopping_threshold is not None:
         cfg.early_stopping_threshold = args.early_stopping_threshold
+    cfg.allow_noisy_data = args.allow_noisy_data
     train(cfg)
 
 

@@ -24,6 +24,14 @@
     "INFO": 0.3,
     "NONE": 0.0
   },
+  "slm_inference": {
+    "_comment": "How the Stage-2 gate feeds code to the small classifier. Mirrors the training chunking in src/training/dataset_builder.py. The SLM scores uniform code windows (not whole functions); cross-file context is NOT fed to the SLM — it is attached only when a finding escalates to the Stage-3 LLM.",
+    "chunk_max_lines": 64,
+    "chunk_overlap": 8,
+    "min_code_lines": 2,
+    "aggregation": "max",
+    "top_chunks_for_llm": 5
+  },
   "stage3_llm": {
     "provider": "unipassau",
     "model_name": "qwen3-next-80b-a3b-instruct",
@@ -56,6 +64,13 @@
       "max_total": 500,
       "max_samples_per_cwe": null,
       "max_workers": 8
+    },
+    "chunk": {
+      "_comment": "Train the classifier on uniform code windows (function-level label, chunk-level input) so every sample fits CodeBERT's 512-token window. See docs/SLM_CHUNKING.md.",
+      "data": true,
+      "max_lines": 64,
+      "overlap": 8,
+      "min_code_lines": 2
     }
   }
 }

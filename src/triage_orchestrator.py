@@ -22,6 +22,13 @@ try:
 except ImportError:
     from gate_strategies import linear_weighted_gate
 
+# Reuse the SAME snippet assembly used to build the training data so the SLM
+# sees function + module imports at inference time (train/inference parity).
+try:
+    from evaluation.code_context import collect_module_imports, build_context_snippet
+except ImportError:
+    from code_context import collect_module_imports, build_context_snippet
+
 class TriageOrchestrator:
     """
     Orchestrates the Stage 2 triage workflow by parsing static analysis findings,
@@ -115,6 +122,68 @@ class TriageOrchestrator:
         except Exception as err:
             print(f"[!] AST parsing or slice exception on target asset file: {err}")
             return ""
+
+    def _resolve_source(self, file_path: str):
+        """Resolve ``file_path`` to an absolute path and return (path, source)."""
+        resolved_path = file_path if os.path.isabs(file_path) else os.path.join(self.workspace_path, file_path)
+        if not os.path.exists(resolved_path):
+            fallback_path = os.path.join(self.workspace_path, os.path.basename(file_path))
+            if os.path.exists(fallback_path):
+                resolved_path = fallback_path
+            else:
+                return resolved_path, None
+        try:
+            with open(resolved_path, "r", encoding="utf-8") as fh:
+                return resolved_path, fh.read()
+        except Exception:
+            return resolved_path, None
+
+    def _function_block(self, resolved_path: str, source: str, start_line: int, end_line: int):
+        """Return ``(function_code, func_start, func_end)`` for the function
+        enclosing ``start_line`` (mirrors ``extract_source_snippet`` but also
+        returns the line span so the SLM input can be re-assembled with imports)."""
+        if source is None:
+            return None, None, None
+        try:
+            tree = ast.parse(source, filename=resolved_path)
+        except Exception:
+            return None, None, None
+        target = None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.lineno <= start_line <= node.end_lineno:
+                    target = node
+                    break
+        if target is None:
+            return None, None, None
+        lines = source.splitlines()
+        lo = target.lineno - 1
+        hi = target.end_lineno
+        return "\n".join(lines[lo:hi]).strip(), target.lineno, target.end_lineno
+
+    def _slm_input(self, source: str, func_start: int, func_end: int) -> str:
+        """Assemble the exact input the SLM is trained on: module imports +
+        the enclosing function. Cross-file context is deliberately excluded
+        here — it is added later, only when a finding is escalated to the LLM."""
+        imports = collect_module_imports(source)
+        return build_context_snippet(source, (func_start, func_end), imports, {})
+
+    def _collect_context(self, func_name: str) -> List[str]:
+        """Return cross-file context blocks (callers / callees) for ``func_name``
+        via the vector store. Used only for LLM escalation, not for SLM scoring."""
+        blocks: List[str] = []
+        if not func_name:
+            return blocks
+        try:
+            flow = self.vector_store.get_explicit_flow_context(func_name)
+            for block in flow:
+                blocks.append(
+                    f"\n# Context: {block['relationship']} | {block['file_path']} | "
+                    f"{block['function_name']}\n{block['source_code']}"
+                )
+        except Exception:
+            pass
+        return blocks
 
     def slm_inference_batch(self, code_snippets: List[str]) -> List[float]:
         """
@@ -251,84 +320,98 @@ class TriageOrchestrator:
         finding_reports = []
         overall_escalate = False
 
-        print(f"[*] Extracting {len(findings)} code snippets with cross-file context...")
+        # Read chunking / aggregation config for the SLM (falling back to
+        # sensible defaults when the block is absent in config.json).
+        slm_cfg = self.config.get("slm_inference", {})
+        chunk_max_lines = slm_cfg.get("chunk_max_lines", 64)
+        chunk_overlap = slm_cfg.get("chunk_overlap", 8)
+        chunk_min_code_lines = slm_cfg.get("min_code_lines", 2)
+        aggregation = slm_cfg.get("aggregation", "max")
+        top_chunks = slm_cfg.get("top_chunks_for_llm", 5)
+
+        print(f"[*] Extracting {len(findings)} functions (SLM scored on uniform chunks)...")
+        self.vector_store = LocalVectorStore(self._config_path, self.workspace_path)
+
         snippets = []
         finding_metadata = []
-
-        #  Initialize vector store for context lookup
-        vector_store = LocalVectorStore(self._config_path, self.workspace_path)
-
         for finding in findings:
             file_target_path = finding.get("path", "")
             start_line = finding.get("start", {}).get("line", 1)
             end_line = finding.get("end", {}).get("line", 1)
             severity = finding.get("extra", {}).get("severity", "WARNING")
-            
-            # Extract full function
-            function_code = self.extract_source_snippet(file_target_path, start_line, end_line)
+
+            resolved_path, source = self._resolve_source(file_target_path)
+            function_code, func_start, func_end = self._function_block(
+                resolved_path, source, start_line, end_line
+            )
             if not function_code:
                 continue
 
-            # Get cross-file context — callers and callees
-            # Extract function name from function_code (simple heuristic: def name(
+            # Function name (simple def/async def heuristic) for cross-file lookup.
             func_name = ""
-            lines = function_code.splitlines()
-            for line in lines:
-                if line.strip().startswith("def ") or line.strip().startswith("async def "):
-                    func_name = line.split("(", 1)[0].replace("def ", "").replace("async def ", "").strip()
+            for line in function_code.splitlines():
+                s = line.strip()
+                if s.startswith("def ") or s.startswith("async def "):
+                    func_name = s.split("(", 1)[0].replace("def ", "").replace("async def ", "").strip()
                     break
 
-            context_blocks = []
-            if func_name:
-                # Get explicit flow context (upstream/downstream)
-                flow_context = vector_store.get_explicit_flow_context(func_name)
-                for block in flow_context:
-                    context_blocks.append(f"\n# Context: {block['relationship']} | {block['file_path']} | {block['function_name']}\n{block['source_code']}")
+            # Cross-file context is for the LLM ONLY — kept out of the SLM input.
+            context_blocks = self._collect_context(func_name)
 
-            #Combine function code + context
-            enriched_code = function_code + "\n" + "".join(context_blocks)
+            # SLM sees function + module imports (matches the training format);
+            # cross-file context is not baked in.
+            slm_input = self._slm_input(source, func_start, func_end)
 
-            snippets.append(enriched_code)
+            snippets.append(slm_input)
             finding_metadata.append({
                 "path": file_target_path,
                 "start_line": start_line,
                 "end_line": end_line,
                 "severity": severity,
-                "function_name": func_name
+                "function_name": func_name,
+                "function_code": function_code,
+                "context_blocks": context_blocks,
             })
 
-        print(f"[*] Running batched SLM inference on {len(snippets)} enriched code snippets...")
-        slm_scores = self.slm_inference_batch(snippets)
+        print(f"[*] Running chunked SLM inference on {len(snippets)} functions...")
+        chunk_results = self.model_manager.get_classifier_chunk_scores(
+            snippets,
+            chunk_max_lines=chunk_max_lines,
+            chunk_overlap=chunk_overlap,
+            min_code_lines=chunk_min_code_lines,
+            aggregation=aggregation,
+        )
 
         print(f"[*] Applying risk gate logic to {len(findings)} findings...")
-        for idx, (metadata, slm_score) in enumerate(zip(finding_metadata, slm_scores)):
-            file_target_path = metadata["path"]
+        for metadata, result in zip(finding_metadata, chunk_results):
             severity = metadata["severity"]
-            func_name = metadata["function_name"]
-
-            # Re-extract enriched snippet for report
-            function_code = self.extract_source_snippet(file_target_path, metadata["start_line"], metadata["end_line"])
-            context_blocks = []
-            if func_name:
-                flow_context = vector_store.get_explicit_flow_context(func_name)
-                for block in flow_context:
-                    context_blocks.append(f"\n# Context: {block['relationship']} | {block['file_path']} | {block['function_name']}\n{block['source_code']}")
-            enriched_code = function_code + "\n" + "".join(context_blocks)
-
+            slm_score = result["score"]
             gate_result = self.evaluate_gate(severity, slm_score)
-
             if gate_result["escalate"]:
                 overall_escalate = True
 
+            # On escalation, hand the LLM the suspicious chunks (highest SLM
+            # probability) plus the cross-file context — the "cross-context
+            # argumentation" the Stage-3 agent reasons over.
+            suspicious = sorted(
+                result["chunks"], key=lambda c: c["prob"], reverse=True
+            )[:top_chunks]
+
             finding_reports.append({
-                "evaluated_file": file_target_path,
-                "code_snippet": enriched_code,  # includes cross-file context
+                "evaluated_file": metadata["path"],
+                "function_name": metadata["function_name"],
+                "code_snippet": metadata["function_code"],
                 "metrics": {
                     "semgrep_severity_score": gate_result["metrics"]["static_severity_weight"],
                     "slm_threat_probability": gate_result["metrics"]["slm_probability_score"],
-                    "calculated_combined_risk": gate_result["risk_score"]
+                    "slm_chunk_scores": [c["prob"] for c in result["chunks"]],
+                    "calculated_combined_risk": gate_result["risk_score"],
                 },
-                "escalate": gate_result["escalate"]
+                "escalate": gate_result["escalate"],
+                "suspicious_chunks": suspicious if gate_result["escalate"] else [],
+                "cross_file_context": (
+                    "".join(metadata["context_blocks"]) if gate_result["escalate"] else ""
+                ),
             })
 
         triage_report = {

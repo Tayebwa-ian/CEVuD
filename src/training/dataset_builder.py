@@ -52,6 +52,12 @@ from code_context import (  # noqa: E402
 from benchmark_manifest import load_manifest  # noqa: E402
 from repo_provider import clone_repo  # noqa: E402
 from schema import BenchmarkSample, ProjectManifest  # noqa: E402
+from data_quality import (  # noqa: E402
+    code_signal_line_count,
+    find_contradictions,
+    normalize_code,
+)
+from code_chunks import chunk_code  # noqa: E402
 
 
 # ── Data structures ─────────────────────────────────────────────────────────
@@ -70,6 +76,11 @@ class EnrichedSample:
     end_line: int
     source_code_length: int
     context_length: int
+    # Chunking metadata (set when the sample is a uniform code window cut from
+    # a larger function during build_dataset; -1 / 0 mean "whole function").
+    chunk_index: int = -1
+    chunk_start: int = 0
+    chunk_end: int = 0
 
 
 # ── Low-level helpers ───────────────────────────────────────────────────────
@@ -334,6 +345,44 @@ def load_jsonl(path: str) -> Tuple[List[str], List[int]]:
     return texts, labels
 
 
+def _drop_contradictory(
+    enriched: List[EnrichedSample],
+    keep_contradictory: bool,
+    min_code_lines: int,
+) -> "tuple[List[EnrichedSample], int, int]":
+    """Defensive data-quality pass over already-enriched samples.
+
+    Returns ``(kept, n_contradiction, n_low_signal)``.
+
+    * ``n_contradiction``: samples whose ``text`` is byte-identical (ignoring
+      whitespace) to a sample of the OPPOSITE label — a hard contradiction the
+      classifier cannot learn. Always dropped unless ``keep_contradictory``.
+    * ``n_low_signal``: samples whose enriched ``text`` carries fewer than
+      ``min_code_lines`` lines of real code signal (comments/docstrings/version
+      assignments don't count) — e.g. a snippet that expanded to a lone
+      ``__version__ = '3.7'`` line.
+    """
+    if keep_contradictory:
+        contradictions: set = set()
+    else:
+        contradictions = set(
+            find_contradictions((s.text, s.label) for s in enriched)
+        )
+
+    kept: List[EnrichedSample] = []
+    n_contra = n_short = 0
+    for s in enriched:
+        norm = normalize_code(s.text)
+        if norm in contradictions:
+            n_contra += 1
+            continue
+        if code_signal_line_count(s.text) < min_code_lines:
+            n_short += 1
+            continue
+        kept.append(s)
+    return kept, n_contra, n_short
+
+
 def build_dataset(
     manifest_path: str,
     output_dir: str = "training_data",
@@ -347,6 +396,20 @@ def build_dataset(
     max_samples_per_cwe: Optional[int] = None,
     max_total: Optional[int] = None,
     sample_cap_seed: int = 42,
+    keep_contradictory: bool = False,
+    min_code_lines: int = 2,
+    # ── Chunking ─────────────────────────────────────────────────────────────
+    # When ``chunk_data`` is True (default), every enriched function is cut into
+    # uniform code windows of ``chunk_max_lines`` (with ``chunk_overlap``) so the
+    # classifier is trained on inputs that fit its 512-token context — matching
+    # how the Stage-2 gate scores code at inference. Each chunk inherits the
+    # function-level label. Chunks with < ``chunk_min_code_lines`` of real code
+    # signal are dropped, and (vuln, safe) chunk pairs with identical normalized
+    # text are removed as hard contradictions.
+    chunk_data: bool = True,
+    chunk_max_lines: int = 64,
+    chunk_overlap: int = 8,
+    chunk_min_code_lines: int = 2,
 ) -> Dict[str, Any]:
     """Builds an enriched, split training dataset from the benchmark manifest.
 
@@ -371,6 +434,69 @@ def build_dataset(
 
     if not enriched:
         raise RuntimeError("No samples were enriched. Check network/git access.")
+
+    # ── Data-quality filter: drop hard contradictions + low-signal snippets ──
+    # Even with clean converters, the full-function expansion in
+    # `_enrich_sample` can still produce byte-identical (vuln, safe) pairs or
+    # snippets that expanded to a single version/comment line. Drop them so the
+    # classifier never trains on contradictory or signal-free text.
+    before_filter = len(enriched)
+    enriched, n_contra, n_short = _drop_contradictory(
+        enriched, keep_contradictory, min_code_lines
+    )
+    dropped_total = before_filter - len(enriched)
+    if dropped_total:
+        print(
+            f"[*] Data-quality filter: {dropped_total} dropped "
+            f"({n_contra} contradictory, {n_short} low-signal). "
+            f"{len(enriched)} remain."
+        )
+
+    # ── Chunking: train on uniform code windows, not whole functions ──────────
+    # CodeBERT is capped at 512 tokens. Feeding whole functions silently
+    # truncates the vulnerable code; feeding uniform chunks keeps every input
+    # inside the context window and matches how the Stage-2 gate scores code at
+    # inference time (no train/inference skew). See docs/SLM_CHUNKING.md.
+    if chunk_data and chunk_max_lines:
+        chunked: List[EnrichedSample] = []
+        for s in enriched:
+            for i, c in enumerate(
+                chunk_code(s.text, chunk_max_lines, chunk_overlap, chunk_min_code_lines)
+            ):
+                chunked.append(
+                    EnrichedSample(
+                        sample_id=f"{s.sample_id}::c{i}",
+                        project=s.project,
+                        text=c.text,
+                        label=s.label,
+                        vulnerability_type=s.vulnerability_type,
+                        cwe=s.cwe,
+                        file_path=s.file_path,
+                        function_name=s.function_name,
+                        start_line=s.start_line,
+                        end_line=s.end_line,
+                        source_code_length=len(c.text.splitlines()),
+                        context_length=len(c.text.splitlines()),
+                        chunk_index=i,
+                        chunk_start=c.start_line,
+                        chunk_end=c.end_line,
+                    )
+                )
+        # Chunk-level contradiction/dedup pass: a (vuln, safe) chunk pair with
+        # identical normalized text is a hard contradiction — drop it.
+        if not keep_contradictory:
+            contradictions = set(find_contradictions((c.text, c.label) for c in chunked))
+            kept = [c for c in chunked if normalize_code(c.text) not in contradictions]
+            n_chunk_contra = len(chunked) - len(kept)
+            if n_chunk_contra:
+                print(f"[*] Chunk filter: {n_chunk_contra} contradictory chunks dropped.")
+            chunked = kept
+        n_before_chunk = len(enriched)
+        enriched = chunked
+        print(
+            f"[*] Chunking: {n_before_chunk} functions -> {len(enriched)} chunks "
+            f"(max_lines={chunk_max_lines}, overlap={chunk_overlap})."
+        )
 
     # ── Few-shot caps (applied BEFORE split to keep class balance) ─────────────
     cap_before = len(enriched)
@@ -413,6 +539,16 @@ def build_dataset(
         ),
         "capped_from": cap_before,
         "capped_to": cap_after,
+        "dropped_contradictory": n_contra,
+        "dropped_low_signal": n_short,
+        "dropped_total": dropped_total,
+        "chunking": {
+            "enabled": bool(chunk_data and chunk_max_lines),
+            "max_lines": chunk_max_lines,
+            "overlap": chunk_overlap,
+            "min_code_lines": chunk_min_code_lines,
+            "chunks_total": len(enriched),
+        },
     }
 
     summary_path = os.path.join(output_dir, "dataset_summary.json")

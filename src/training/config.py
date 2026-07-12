@@ -28,6 +28,10 @@ class TrainingConfig:
     # When True, freeze the CodeBERT backbone and train only the classifier
     # head — far more sample-efficient and stable for small datasets.
     freeze_backbone: bool = False
+    # When True, allow training even if the dataset contains contradictory
+    # (identical-text, opposite-label) samples. Off by default — such data
+    # cannot be learned and wastes a full training run.
+    allow_noisy_data: bool = False
     # Early stopping: halt once validation loss fails to improve for this many
     # consecutive evaluations. Best checkpoint (by val loss) is restored.
     early_stopping_patience: int = 3
@@ -48,6 +52,15 @@ class TrainingConfig:
     max_samples_per_class: int | None = None
     max_samples_per_cwe: int | None = None
     max_total: int | None = None
+
+    # ── Chunking (train on uniform code windows, not whole functions) ───────
+    # Mirrors how the Stage-2 gate scores code at inference. Each chunk keeps
+    # the function-level label. Set ``chunk_data=False`` to revert to
+    # whole-function samples.
+    chunk_data: bool = True
+    chunk_max_lines: int = 64
+    chunk_overlap: int = 8
+    chunk_min_code_lines: int = 2
 
     # ── Split ratios ────────────────────────────────────────────────────────
     val_fraction: float = 0.2

@@ -238,7 +238,26 @@ class DeepAppSecAgent:
             findings_input += f"Target Function: {func_name}\n"
             findings_input += f"File location: {file_path}\n"
             findings_input += f"Isolated Code Snippet:\n```python\n{snippet}\n```\n"
-            findings_input += f"Calculated Combined Risk Index: {risk_score:.3f}\n\n"
+            findings_input += f"Calculated Combined Risk Index: {risk_score:.3f}\n"
+
+            # Cross-context argumentation: the Stage-2 gate already localized
+            # the suspicious code windows and gathered cross-file lineage. Feed
+            # both to the LLM so it reasons over the real evidence, not the
+            # whole function in isolation.
+            suspicious = finding.get("suspicious_chunks", [])
+            if suspicious:
+                findings_input += "\nSuspicious Code Chunks (flagged by the local classifier):\n"
+                for ci, chunk in enumerate(suspicious, 1):
+                    findings_input += (
+                        f"--- chunk {ci} (lines {chunk.get('start_line')}-"
+                        f"{chunk.get('end_line')}, P(vuln)={chunk.get('prob')}) ---\n"
+                        f"```python\n{chunk.get('text', '')}\n```\n"
+                    )
+            cross_ctx = finding.get("cross_file_context", "")
+            if cross_ctx and cross_ctx.strip():
+                findings_input += f"\nCross-File Context (callers / callees):\n{cross_ctx}\n"
+
+            findings_input += "\n"
 
         if not findings_input.strip():
             print("[!] No valid findings to analyze. Skipping LLM generation.")

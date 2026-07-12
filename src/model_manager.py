@@ -220,6 +220,64 @@ class ModelManager:
                 vuln_probs = probabilities[:, self._vuln_class_idx].tolist()
             return vuln_probs
 
+    def get_classifier_chunk_scores(
+        self,
+        code_snippets: list,
+        chunk_max_lines: int = 64,
+        chunk_overlap: int = 8,
+        min_code_lines: int = 2,
+        aggregation: str = "max",
+    ) -> list:
+        """Scores code *snippets* by cutting each into uniform chunks that fit
+        the model's 512-token window, scoring every chunk, then aggregating.
+
+        Returns a list (parallel to ``code_snippets``) of dicts::
+
+            {"score": float, "chunks": [{"start_line", "end_line", "prob", "text"}, ...]}
+
+        ``score`` is the aggregated per-chunk probability (default ``max``: a
+        function is vulnerable if any chunk is). ``chunks`` is kept so callers
+        (the Stage-2 gate) can show the LLM exactly which windows were flagged.
+
+        This mirrors how the classifier is trained (function-level label,
+        chunk-level input) so train/inference stay consistent.
+        """
+        from code_chunks import chunk_code, aggregate_chunk_scores
+
+        if not code_snippets:
+            return []
+
+        # Flatten all chunk texts into one batch for a single model call.
+        per_snippet_chunks: List[list] = []
+        flat_texts: List[str] = []
+        for snippet in code_snippets:
+            chunks = chunk_code(snippet or "", chunk_max_lines, chunk_overlap, min_code_lines)
+            per_snippet_chunks.append(chunks)
+            flat_texts.extend(c.text for c in chunks)
+
+        flat_probs = self.get_classifier_inference(flat_texts) if flat_texts else []
+
+        results = []
+        cursor = 0
+        for chunks in per_snippet_chunks:
+            if not chunks:
+                results.append({"score": 0.0, "chunks": []})
+                continue
+            probs = flat_probs[cursor:cursor + len(chunks)]
+            cursor += len(chunks)
+            chunk_info = [
+                {
+                    "start_line": c.start_line,
+                    "end_line": c.end_line,
+                    "prob": round(float(p), 4),
+                    "text": c.text,
+                }
+                for c, p in zip(chunks, probs)
+            ]
+            score = aggregate_chunk_scores([float(p) for p in probs], aggregation)
+            results.append({"score": round(float(score), 4), "chunks": chunk_info})
+        return results
+
     def _configure_scoring(self, model):
         """Decide how raw logits map to a single vulnerability probability.
 

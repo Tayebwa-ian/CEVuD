@@ -68,6 +68,18 @@ sys.path.insert(
 )
 from code_context import parse_diff_anchors  # noqa: E402
 
+# data_quality lives in src/ — shared noise/trivial-change filters that keep
+# label noise (version bumps, docs, near-identical pre/post pairs) out of the
+# manifest. Imported here so the converter can reject noisy rows at the source.
+_SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+from data_quality import (  # noqa: E402
+    _is_noise_file,
+    code_signal_line_count,
+    is_trivial_change,
+)
+
 # ---------------------------------------------------------------------------
 # Robust import: give the user a clear error if `datasets` is not installed.
 # ---------------------------------------------------------------------------
@@ -205,6 +217,9 @@ def convert_cvefixes(
     limit: Optional[int] = None,
     split: str = "train",
     local_dir: Optional[str] = None,
+    noise_filter: bool = True,
+    trivial_filter: bool = True,
+    min_code_lines: int = 2,
 ) -> None:
     """Converts CVEfixes to a CEVuD benchmark manifest.
 
@@ -216,12 +231,23 @@ def convert_cvefixes(
         split: HuggingFace split to load (usually 'train').
         local_dir: Path to a local ``save_to_disk`` artifact
             (e.g. ``./cvefixes_dataset``). Preferred over Hub streaming.
+        noise_filter: When True (default), skip rows whose changed file is a
+            docs/test/packaging/version file — these only yield version bumps
+            and doc edits as (vuln, safe) pairs, which is pure label noise.
+        trivial_filter: When True (default), skip (vuln, safe) pairs whose
+            only difference is non-semantic (comments, docstrings, version
+            assignments). Such pairs have no learnable vulnerability signal.
+        min_code_lines: Drop a sample whose vulnerable snippet contains fewer
+            than this many lines of real code signal (comments/docstrings/
+            version assignments do not count). Prevents training on snippets
+            that are, e.g., a single ``__version__ = '3.7'`` line.
     """
     ds = _load_source(dataset_id, local_dir, split)
 
     samples_by_project: Dict[str, List[Dict[str, Any]]] = {}
     project_repo_urls: Dict[str, str] = {}
     total_seen = total_skipped = total_added = 0
+    skipped_noise = skipped_trivial = skipped_short = 0
 
     # Stream row-by-row — no memory explosion
     for row in ds:
@@ -260,12 +286,27 @@ def convert_cvefixes(
             continue
         file_path = py_files[0]
 
+        # ── Noise-file filter ────────────────────────────────────────────────
+        # Docs/tests/packaging/version files produce pairs whose only diff is a
+        # version string or doc edit — unlearnable, and they dominate some
+        # repos (e.g. idna's package_data.py). Skip them up front.
+        if noise_filter and _is_noise_file(file_path):
+            skipped_noise += 1
+            continue
+
         diff = _resolve_diff_with_context(row)
         anchors = parse_diff_anchors(diff) if diff else {}
         anchor = anchors.get(file_path)
         if anchor is None:
             # Could not locate the changed function in the diff; skip.
             total_skipped += 1
+            continue
+
+        # ── Minimum code-signal filter ───────────────────────────────────────
+        # A snippet with no real code (e.g. a lone ``__version__ = '3.6'``)
+        # carries no learnable signal and would just add label noise.
+        if code_signal_line_count(code) < min_code_lines:
+            skipped_short += 1
             continue
 
         project_name = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
@@ -303,6 +344,27 @@ def convert_cvefixes(
             samples_by_project[project_name] = []
             project_repo_urls[project_name] = repo_url
 
+        # ── SAFE sample (post-fix version) ───────────────────────────────────
+        # Mirroring the pre-fix version with the POST-image anchor gives us a
+        # label=0 companion for every vulnerable row — a naturally *balanced*
+        # 1:1 dataset. We explicitly pin target_commit to the fix commit so the
+        # extractor reads the CORRECT (patched) file for this sample.
+        safe_code = fixed_code.strip() if fixed_code and fixed_code.strip() else None
+
+        # ── Trivial / contradictory-pair filter ──────────────────────────────
+        # If the vulnerable and fixed snippets differ ONLY in non-semantic ways
+        # (comments, docstrings, version bumps) the (vuln, safe) pair is pure
+        # label noise — the model would be trained on near-identical text with
+        # opposite labels. Drop the whole pair (both sides) in that case, and
+        # also drop when the safe side has no learnable code signal.
+        if safe_code is not None:
+            if trivial_filter and is_trivial_change(code, safe_code):
+                skipped_trivial += 1
+                continue
+            if code_signal_line_count(safe_code) < min_code_lines:
+                skipped_short += 1
+                continue
+
         # ── VULNERABLE sample (pre-fix version) ───────────────────────────────
         # The pre-image anchor locates the vulnerable function in the PARENT of
         # the fix commit. We leave target_commit unset so the extractor checks
@@ -315,12 +377,6 @@ def convert_cvefixes(
         )
         total_added += 1
 
-        # ── SAFE sample (post-fix version) ───────────────────────────────────
-        # Mirroring the pre-fix version with the POST-image anchor gives us a
-        # label=0 companion for every vulnerable row — a naturally *balanced*
-        # 1:1 dataset. We explicitly pin target_commit to the fix commit so the
-        # extractor reads the CORRECT (patched) file for this sample.
-        safe_code = fixed_code.strip() if fixed_code and fixed_code.strip() else None
         if safe_code:
             safe_start = int(anchor["post_start"])
             safe_end = int(anchor["post_end"])
@@ -362,6 +418,9 @@ def convert_cvefixes(
     print(f"  Dataset       : {dataset_id}")
     print(f"  Rows scanned  : {total_seen:,}")
     print(f"  Rows skipped  : {total_skipped:,}  (non-Python / missing fields)")
+    print(f"  Skipped noise : {skipped_noise:,}  (docs/tests/packaging/version files)")
+    print(f"  Skipped short : {skipped_short:,}  (< {min_code_lines} code-signal lines)")
+    print(f"  Skipped trivial: {skipped_trivial:,}  (vuln==safe up to comments/version)")
     print(f"  Samples added : {total_added:,}")
     print(f"  Projects      : {len(manifest):,}")
     print(f"  Output        : {output_path}")
@@ -425,6 +484,35 @@ def _build_parser() -> argparse.ArgumentParser:
         default="train",
         help="HuggingFace dataset split to load. Default: train.",
     )
+    p.add_argument(
+        "--no-noise-filter",
+        dest="noise_filter",
+        action="store_false",
+        default=True,
+        help=(
+            "Disable the docs/tests/packaging/version-file filter (keeps "
+            "noisy rows such as version bumps in package_data.py)."
+        ),
+    )
+    p.add_argument(
+        "--no-trivial-filter",
+        dest="trivial_filter",
+        action="store_false",
+        default=True,
+        help=(
+            "Disable the trivial-change filter (keeps (vuln, safe) pairs that "
+            "differ only in comments/docstrings/version assignments)."
+        ),
+    )
+    p.add_argument(
+        "--min-code-lines",
+        type=int,
+        default=2,
+        help=(
+            "Drop a sample whose vulnerable/fixed snippet has fewer than this "
+            "many lines of real code signal. Default: 2."
+        ),
+    )
     return p
 
 
@@ -436,4 +524,7 @@ if __name__ == "__main__":
         limit=args.limit,
         split=args.split,
         local_dir=args.local_dir,
+        noise_filter=args.noise_filter,
+        trivial_filter=args.no_trivial_filter,
+        min_code_lines=args.min_code_lines,
     )

@@ -39,6 +39,7 @@ from sklearn.metrics import (
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from training.config import TrainingConfig  # noqa: E402
 from training.dataset_builder import load_jsonl  # noqa: E402
+from data_quality import find_contradictions  # noqa: E402
 
 
 # ── PyTorch Dataset ─────────────────────────────────────────────────────────
@@ -146,6 +147,34 @@ def _compute_class_weights(labels, num_labels: int) -> torch.Tensor:
     ]
     return torch.tensor(weights, dtype=torch.float)
 
+
+def _check_training_data_quality(train_ds: "VulnerabilityDataset", allow_noisy: bool) -> None:
+    """Pre-flight guard: count texts that appear with BOTH labels (hard
+    contradictions). Training on such data is hopeless — the loss plateaus at
+    ``ln(2)`` and ROC-AUC stays at ~0.5. Refuse by default so a full run isn't
+    wasted; pass ``allow_noisy`` to override (e.g. when debugging the filter)."""
+    contradictions = find_contradictions(zip(train_ds.texts, train_ds.labels))
+    n = len(contradictions)
+    total = len(train_ds)
+    if n == 0:
+        print("[*] Data-quality pre-flight: no contradictory (identical-text, "
+              "opposite-label) samples found.")
+        return
+    frac = (n / total) if total else 0.0
+    print(
+        f"[!] Data-quality pre-flight: {n} normalized texts ({frac:.1%} of "
+        f"training samples) appear with BOTH labels (hard contradictions)."
+    )
+    if frac >= 0.05 and not allow_noisy:
+        raise RuntimeError(
+            "Refusing to train on a dataset with >=5% contradictory samples.\n"
+            "  -> Rebuild the manifest with the noise/trivial filters in\n"
+            "     src/scripts/convert_cvefixes.py / convert_vudenc.py, then run\n"
+            "     `build-dataset` again. Or pass --allow-noisy-data to override."
+        )
+    print("[!] Training will likely fail to learn (loss ~ln(2), ROC-AUC ~0.5). "
+          "Rebuild the data, or pass --allow-noisy-data to proceed anyway.")
+
 # ── Main training loop ──────────────────────────────────────────────────────
 
 def train(cfg: TrainingConfig) -> Dict[str, Any]:
@@ -162,6 +191,9 @@ def train(cfg: TrainingConfig) -> Dict[str, Any]:
 
     train_ds = VulnerabilityDataset(cfg.train_path, tokenizer, cfg.max_length)
     val_ds = VulnerabilityDataset(cfg.val_path, tokenizer, cfg.max_length)
+
+    # Data-quality pre-flight: refuse to waste a run on contradictory data.
+    _check_training_data_quality(train_ds, cfg.allow_noisy_data)
 
     # Per-class weights from the training distribution to counter imbalance.
     class_weights = _compute_class_weights(train_ds.labels, cfg.num_labels)

@@ -50,6 +50,12 @@ PrimeVul-style commit datasets) filtered to Python — the pre-fix function
 version becomes a label=1 sample, the post-fix version becomes a label=0
 sample, and `git_source.ref` can point at the specific commit SHA so results
 are exactly reproducible.
+
+Alternatively, a self-contained corpus such as VUDENC (via
+`src/scripts/convert_vudenc.py`) carries no repository metadata: its projects
+use `local_source` and embed each function in `source_code`, which the
+extraction pipeline scores directly (see `raw_score_extractor.py`'s inline
+path). Both shapes share the schema below and are interchangeable downstream.
 """
 
 from __future__ import annotations

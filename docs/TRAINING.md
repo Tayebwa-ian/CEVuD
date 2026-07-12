@@ -3,8 +3,13 @@
 ## Overview
 
 CEVuD's training pipeline fine-tunes a small CodeBERT-based classifier
-(`microsoft/codebert-base`, ~125M params) on the existing CVEFixes benchmark. It
-supports two regimes:
+(`microsoft/codebert-base`, ~125M params) on the **CVEfixes** benchmark
+(`benchmark_manifest_cvefixes.json`, produced by `convert_cvefixes.py`), which
+is used for the model's training, validation, and its own evaluation
+(project-level splits prevent in-corpus leakage). The **VUDENC** corpus
+(`benchmark_manifest_vudenc.json`, from `convert_vudenc.py`) is the dataset for
+the **gate study** — the comparative evaluation of the full CEVuD pipeline run
+by `src/evaluation/`. The pipeline supports two regimes:
 
 * **Quick smoke test (`--few-shot`)** — a small, balanced, credible subset
   (~100 samples). Good for verifying the pipeline end-to-end, but **too small to
@@ -20,6 +25,51 @@ and stable when data is limited, and much faster to train.
 
 The trained model produces `P(vulnerable) ∈ [0, 1]` and can be dropped into
 `config.json` as the new Stage-2 local classifier with zero code changes.
+
+## Model Architecture
+
+The custom classifier is a **standard HuggingFace `RobertaForSequenceClassification`
+head on top of `microsoft/codebert-base`** (a RoBERTa encoder, ~125 M params).
+CEVuD does *not* use a hand-written head — `trainer.py` loads
+`AutoModelForSequenceClassification.from_pretrained(base_model, num_labels=2)`.
+
+1. **Pooler** — takes the `[CLS]` token's last hidden state (768-dim) and
+   applies `pooler.dense` (768 → 768) + `tanh`.
+2. **Classifier** — `classifier.dense` (768 → 768, `tanh`) → dropout →
+   `classifier.out_proj` (768 → 2) produces the two-class logits.
+
+A softmax over the logits gives `P(vulnerable) = softmax(logits)[:, 1]`, which
+is the `P_slm` score fed into the Stage-2 linear gate. The published checkpoint
+contains both `pooler` and `classifier` weights. With `--freeze-backbone`, only
+the `classifier.*` submodule is trained and the encoder + pooler stay frozen.
+
+This is documented in full (with load snippet, hyperparameters, and limitations)
+in **[`MODEL_CARD.md`](MODEL_CARD.md)** — that file is
+the HuggingFace-ready model card.
+
+## Datasets: model training vs. gate study
+
+The two corpora play distinct roles in the pipeline:
+
+| Role | Dataset | Converter | Manifest |
+|---|---|---|---|
+| Classifier training / validation / evaluation | CVEfixes | `convert_cvefixes.py` | `benchmark_manifest_cvefixes.json` |
+| Gate study (comparative evaluation of the full pipeline) | VUDENC | `convert_vudenc.py` | `benchmark_manifest_vudenc.json` |
+
+- CVEfixes develops the small model end-to-end: it is used for training,
+  validation (early-stopping / best-checkpoint selection), and the model's own
+  evaluation. Splits are stratified by project, so no project appears in more
+  than one split (prevents in-corpus leakage).
+- VUDENC is the corpus for the gate study: `src/evaluation/` runs the
+  comparative evaluation of Semgrep + the CVEfixes-trained classifier + the
+  gating strategies against VUDENC's real-world functions.
+
+Both manifests share the same schema (see
+`DATASET_CARD.md`), so the training and evaluation harnesses are
+interchangeable. VUDENC ships no repository/commit metadata, so its manifest
+uses `local_source` + embedded `source_code`; CVEfixes uses `git_source`
+(real repos are cloned during evaluation). See `convert_vudenc.py` for how
+VUDENC's per-line labels are collapsed to function-level labels.
 
 ## Directory Layout
 
@@ -309,6 +359,41 @@ RUN if [ -n "$CUSTOM_MODEL_PATH" ]; then \
 
 At runtime, `config.json` is patched automatically to point the classifier at
 `/app/custom_model`.
+
+## Publishing to Hugging Face
+
+Both the trained model and the two benchmark manifests are intended for
+publication on the HuggingFace Hub (model + datasets), which also backs the
+research paper. The repository already ships ready-to-publish cards:
+
+- **Model card** — [`MODEL_CARD.md`](MODEL_CARD.md)
+  (architecture, training data/procedure, hyperparameters, limitations, load
+  snippet).
+- **Dataset cards** — [`DATASET_CARD.md`](DATASET_CARD.md)
+  (CVEfixes training set + VUDENC evaluation set, shared schema).
+
+### Publish the model
+
+```bash
+# From the trained run directory (training_output/latest/model or run_*/model):
+python -m huggingface_hub huggingface-cli upload cevud/codebert-vuln-classifier ./model
+# then add MODEL_CARD.md as the repo README (rename to README.md on upload)
+```
+
+The checkpoint contains the full `RobertaForSequenceClassification` weights
+(pooler + classifier), so it loads with
+`AutoModelForSequenceClassification.from_pretrained("cevud/codebert-vuln-classifier")`.
+
+### Publish the datasets
+
+```bash
+python -m huggingface_hub huggingface-cli upload cevud/cvefixes-benchmark benchmark_manifest_cvefixes.json
+python -m huggingface_hub huggingface-cli upload cevud/vudenc-benchmark   benchmark_manifest_vudenc.json
+```
+
+> Before publishing, confirm the upstream CVEfixes and VUDENC licenses permit
+> redistribution, and strip or document any provenance fields you do not wish
+> to share.
 
 ## Dataset Construction Methodology
 

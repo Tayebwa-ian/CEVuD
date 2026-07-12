@@ -1,59 +1,66 @@
 # CEVuD: Cost-Effective Vulnerability Detection
 
-CEVuD is a Python-based security triage pipeline designed to integrate into large-scale CI/CD environments. It combines static analysis (Semgrep), local semantic machine learning (a small vulnerability classifier), and optional frontier LLM-based remediation synthesis.
+CEVuD is a Python-based security triage pipeline for large-scale CI/CD
+environments. It combines static analysis (Semgrep), a local semantic model (a
+small vulnerability classifier), and an optional frontier LLM for remediation
+synthesis — gated so the expensive LLM only runs on the highest-risk findings.
 
-The system is designed for **cost-aware code review workflows**. Running a frontier LLM (like GPT-4 or Claude) on every single file change is prohibitively expensive and slow. CEVuD solves this by using a zero-marginal-cost edge compute layer (a "gate") to filter out false positives and low-risk code, escalating only the highest-risk findings to the LLM.
-
----
-
-## 🏗️ Architecture Overview
-
-The pipeline operates in three distinct stages:
-
-1. **Stage 1: Static Taint Analysis**
-   - Runs Semgrep with standard Python rules plus proprietary custom taint rules.
-   - Traces untrusted data from sources to dangerous sinks.
-   - Outputs a fast, deterministic JSON report of potential vulnerabilities and their severity (`ERROR`, `WARNING`, `INFO`).
-
-2. **Stage 2: Local Triage & Gating (The "Smart Gate")**
-   - Parses the target workspace into an Abstract Syntax Tree (AST) to extract pristine function blocks corresponding to Semgrep findings.
-    - Uses a local CodeBERT sequence classifier (`jayansh21/codesheriff-bug-classifier`, fine-tuned on `microsoft/codebert-base`) to output a probabilistic threat score (`P_slm`).
-   - Calculates a combined risk score: `R = (W_1 * S_sev) + (W_2 * P_slm)`.
-   - **Escalates** the finding to Stage 3 if `R` exceeds a configurable threshold, or if critical static/semantic override thresholds are triggered.
-
-3. **Stage 3: Remediation Synthesis**
-   - Only executed for findings that breach the Stage 2 gate.
-   - An autonomous LLM agent receives the flagged code.
-   - Uses a local SQLite vector store to perform Retrieval-Augmented Generation (RAG) for cross-file context mapping.
-   - Writes a highly structured, developer-ready `remediation_dossier.md` containing root cause analysis, exploit proof-of-concepts, and a secure code patch.
+> **This file is the navigation hub.** All detailed documentation lives in
+> [`docs/`](docs/). Start with [`docs/INDEX.md`](docs/INDEX.md) for the full map,
+> and [`docs/design.md`](docs/design.md) / [`docs/context.md`](docs/context.md)
+> for architecture and philosophy.
 
 ---
 
-## 📁 Repository Layout
+## Architecture (summary)
 
-### Core Execution
-- `src/triage_orchestrator.py`: Orchestrates Stage 2. Scores snippets and writes the triage ledger (`stage1_2_triage.json`).
-- `src/agent.py`: Runs Stage 3. Uses the triage ledger and vector store to generate the remediation dossier.
-- `src/dataset_ingest.py`: Parses codebases/manifests and indexes them into the SQLite vector store.
-- `src/diff_parser.py`: Analyzes Git diffs for PR-based incremental scanning.
+The pipeline runs in three stages:
 
-### Core Support & Models
-- `src/model_manager.py`: Centralizes HuggingFace model loading and local inference (CodeSheriff and the CodeBERT embeddings).
-- `src/training/`: Few-shot fine-tuning pipeline for a custom CodeBERT vulnerability classifier (dataset builder, trainer, evaluator, CLI).
-- `src/vector_store.py`: Manages SQLite storage for AST-parsed function blocks and their dense vectors.
-- `src/llm_factory.py`: Interface wrapper for calling external frontier LLMs.
+1. **Stage 1 — Static taint analysis.** Semgrep traces untrusted data to
+   dangerous sinks and emits a fast, deterministic JSON report
+   (`ERROR` / `WARNING` / `INFO`).
+2. **Stage 2 — Local triage & gating (the "Smart Gate").** For each Semgrep
+   finding, the genuine function body (+ module imports) is cut into **uniform
+   code chunks** and scored by a local CodeBERT classifier. The per-chunk
+   probabilities are aggregated into `P_slm`, combined with Semgrep severity via
+   `R = W₁·S_sev + W₂·P_slm`, and escalated only when `R` crosses a threshold.
+   The classifier is trained on CVEfixes (`src/training/`); the default is
+   `jayansh21/codesheriff-bug-classifier`, or set `models.classifier_model` in
+   `config.json` to a custom model (see [`docs/MODEL_CARD.md`](docs/MODEL_CARD.md)).
+3. **Stage 3 — Remediation synthesis.** Only for escalated findings: an LLM
+   agent receives the **suspicious code chunks** and **cross-file context**
+   (callers/callees) gathered by the gate, and writes a `remediation_dossier.md`.
 
-### Evaluation Framework
-- `src/evaluation/run_comparative_evaluation.py`: The master evaluation suite. Used to prove the cost-to-safety tradeoff across thousands of real-world commits.
-- `src/evaluation/grid_search.py`: Optimizes gating weights without human bias.
-- `src/evaluation/repo_provider.py`: Dynamically fetches specific historical git commits for testing and cleans them up.
-- `src/scripts/convert_cvefixes.py` & `convert_vudenc.py`: Dataset parsers to transform raw vulnerability databases into CEVuD manifest format.
+### Why chunks, and why cross-context only at escalation?
+CodeBERT is capped at 512 tokens; feeding whole functions silently truncates
+the vulnerable code. Training and scoring on uniform chunks keeps every input
+inside the window and removes train/inference skew. Cross-file context is *not*
+fed to the small model (it can't use it well and it bloats the input); instead
+it is attached only when a finding escalates, so the LLM reasons over the real
+evidence. Full rationale and the research we borrowed from:
+[`docs/SLM_CHUNKING.md`](docs/SLM_CHUNKING.md).
 
 ---
 
-## 🚀 Quick Start & Usage
+## Repository layout (high level)
 
-### 1. Installation
+| Area | Path |
+|---|---|
+| Stage 2 orchestration | `src/triage_orchestrator.py` |
+| SLM inference + chunking | `src/model_manager.py`, `src/code_chunks.py` |
+| Stage 3 agent | `src/agent.py` |
+| Classifier training | `src/training/` |
+| Dataset converters | `src/scripts/convert_cvefixes.py`, `src/scripts/convert_vudenc.py` |
+| Shared heuristics | `src/data_quality.py`, `src/code_chunks.py` |
+| Gate study / evaluation | `src/evaluation/` |
+
+See [`docs/INDEX.md`](docs/INDEX.md) for the complete module map.
+
+---
+
+## Quick start
+
+### 1. Install
 ```bash
 python -m venv .venv
 source .venv/bin/activate
@@ -61,71 +68,55 @@ pip install -r requirements.txt
 pip install semgrep
 ```
 
-### 2. Standard Codebase Scan
-To scan a target codebase located at `/path/to/target`:
-
-**A. Vector Indexing**
+### 2. Scan a codebase
 ```bash
+# A. Index for RAG
 python src/dataset_ingest.py --mode repo --path /path/to/target
-```
 
-**B. Static Scan (Stage 1)**
-```bash
+# B. Static scan (Stage 1)
 semgrep --config p/python --config ./semgrep_rules/custom_appsec_rules.yaml \
   --no-git-ignore --json --output /path/to/target/semgrep_results.json /path/to/target
-```
 
-**C. Local Gating (Stage 2)**
-```bash
+# C. Local gating (Stage 2) — chunks scored, cross-context attached on escalation
 python src/triage_orchestrator.py --workspace /path/to/target --config config.json
-```
-*(This produces `stage1_2_triage.json` inside the target's artifact directory)*
 
-**D. Remediation Agent (Stage 3)**
-```bash
+# D. Remediation (Stage 3, escalated findings only)
 export OPENAI_API_KEY=your-api-key
 python src/agent.py --workspace /path/to/target --config config.json
 ```
+Operational details: [`docs/USAGE.md`](docs/USAGE.md).
 
-### 3. Evaluating the Model (Benchmarking)
-If you want to prove the model's token reduction rate on real datasets:
+### 3. Train & evaluate the classifier
+CEVuD uses two corpora: **CVEfixes** trains the Stage-2 classifier; **VUDENC**
+is the held-out corpus for the gate study.
 ```bash
-# Convert a dataset (local `save_to_disk` artifact, no network needed)
-python src/scripts/convert_cvefixes.py --local-dir ./cvefixes_dataset --output benchmark_manifest.json
+# Training corpus (CVEfixes) — noise/trivial filters + chunking ON by default
+python src/scripts/convert_cvefixes.py --local-dir ./cvefixes_dataset \
+    --output benchmark_manifest_cvefixes.json
+python -m src.training.cli build-dataset --manifest benchmark_manifest_cvefixes.json
+python -m src.training.cli train --epochs 20 --batch-size 8 --lr 2e-5
 
-# Run evaluation
-python src/evaluation/run_comparative_evaluation.py --manifest benchmark_manifest.json --config config.json
+# Evaluation corpus (VUDENC) — held out from training
+python src/scripts/convert_vudenc.py --output benchmark_manifest_vudenc.json
+python src/evaluation/run_comparative_evaluation.py \
+    --manifest benchmark_manifest_vudenc.json --config config.json
 ```
-*(Results and sensitivity plots are output to `workspace_storage/evaluations/`)*
-
-> **Balanced datasets:** `convert_cvefixes.py` emits a **pair** of samples for every
-> CVEfixes row — the **pre-fix** function as a `label=1` (vulnerable) sample and the
-> **post-fix** function as a `label=0` (safe) sample. Because each row carries both a
-> `vulnerable_code` and a `fixed_code` snippet, this yields a naturally **1:1 balanced**
-> dataset with no extra sampling. VUDENC, by contrast, contains vulnerable functions
-> only, so it is inherently unbalanced — run it alongside the balanced CVEfixes set when
-> you need a negative class.
+Full walkthrough: [`docs/TRAINING.md`](docs/TRAINING.md). Dataset schema:
+[`docs/DATASET_CARD.md`](docs/DATASET_CARD.md). If a training run plateaus at
+`loss≈0.693` / `roc_auc≈0.5`, read [`docs/DATA_QUALITY.md`](docs/DATA_QUALITY.md)
+and **delete `training_data/` + `training_output/`** before rebuilding.
 
 ---
 
-## 🧪 Tests
+## Configuration
+Key gating thresholds live in `config.json`: `weight_static` (0.4),
+`weight_slm` (0.6), `escalation_threshold` (0.52), `slm_override_threshold`
+(0.90). The new chunking/aggregation behaviour is controlled by the
+`slm_inference` block (`chunk_max_lines`, `chunk_overlap`, `aggregation`,
+`top_chunks_for_llm`) and the training `chunk` block.
 
-Unit and integration tests live in `tests/`. Run them with:
-
+## Tests
 ```bash
-python -m pytest tests/            # fast unit tests (no external binaries)
-python -m pytest tests/ --run-e2e  # also runs the live end-to-end pipeline
+python -m pytest tests/            # fast unit tests
+python -m pytest tests/ --run-e2e  # also runs the live pipeline (needs semgrep)
 ```
-
-The `--run-e2e` flag additionally requires `semgrep` to be installed (see
-`USAGE.md`). When `--run-e2e` is supplied but `semgrep` is missing, those tests
-are skipped automatically rather than failing.
-
----
-
-## ⚙️ Configuration
-The default gating thresholds are in `config.json`:
-- `weight_static`: 0.4
-- `weight_slm`: 0.6
-- `escalation_threshold`: 0.52
-- `slm_override_threshold`: 0.90

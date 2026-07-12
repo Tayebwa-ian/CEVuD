@@ -1,15 +1,31 @@
 """
 convert_vudenc.py
-==================
+=================
 Converts the VUDENC dataset (DetectVul/Vudenc on HuggingFace, or the
 original LauraWartschinski/VulnerabilityDetection GitHub clone) into the
-CEVuD benchmark manifest format.
+CEVuD benchmark manifest format — using the SAME manifest schema and
+project organisation as `convert_cvefixes.py` produced
+`benchmark_manifest_cvefixes.json`, so both datasets plug into the same
+evaluation harness (`src/evaluation/run_comparative_evaluation.py`) and
+the same training pipeline (`src/training/`).
+
+WHY THE TWO DATASETS HAVE DISTINCT ROLES
+---------------------------------------
+The custom Stage-2 classifier (src/training/) is developed entirely on
+CVEfixes (benchmark_manifest_cvefixes.json): it is used for the model's
+training, validation, and its own evaluation (project-level splits prevent
+in-corpus leakage). VUDENC (benchmark_manifest_vudenc.json) is the corpus
+for the gate study — the comparative evaluation of the full CEVuD pipeline
+(Semgrep + the CVEfixes-trained classifier + the gating strategies) run by
+src/evaluation/. The two are independently curated, so the gate study
+measures the pipeline on code the classifier never trained on.
 
 ABOUT VUDENC
 ------------
-VUDENC (Vulnerability Detection with Deep Learning on a Natural Codebase)
-contains Python functions from real open-source projects, labeled at a
-per-LINE level for seven vulnerability categories:
+VUDENC (Vulnerability Detection with Deep Learning on a Natural Codebase,
+Wartschinski et al., Information & Software Technology, 2022) contains
+real-world Python functions mined from vulnerability-fixing commits, labeled
+at a **per-line (statement) level** across seven vulnerability categories:
     - SQL injection (SQLi)
     - Cross-Site Scripting (XSS)
     - Command injection
@@ -25,12 +41,35 @@ HuggingFace schema (DetectVul/Vudenc):
     - type      (List[str])  : Per-line vulnerability category string
 
 CEVuD operates at function level (not line level). This converter:
-  1. Joins `raw_lines` back into a full function string (source_code).
+  1. Joins `raw_lines` back into a full function string (`source_code`).
   2. Derives a function-level label: 1 if ANY line is labeled 1, else 0.
+     Functions whose every line is labeled 0 become the `label=0` (safe)
+     class, so VUDENC can supply both classes when its line labels include
+     non-vulnerable functions; check the printed class balance and, if it
+     skews positive, restrict/pre-sample as needed for your experiment.
   3. Derives the vulnerability type from the most-common type in `type`.
   4. Groups samples into logical "projects" by vulnerability category
-     so that the DatasetSplitter can enforce project-level train/val/test
-     splits (preventing data leakage across the boundary).
+     (e.g. `vudenc_sql`, `vudenc_xss`) so the DatasetSplitter can enforce
+     project-level train/val/test splits (preventing data leakage across
+     the boundary).
+
+MANIFEST SCHEMA (mirrors benchmark_manifest_cvefixes.json)
+---------------------------------------------------------
+Each emitted sample carries the same fields as the CVEfixes manifest so the
+two are interchangeable downstream:
+    sample_id, file_path, function_name, start_line, end_line, label,
+    vulnerability_type, source_code, fixed_code, repo_url, commit_id,
+    target_commit, cve_id, cvss_score, diff_with_context
+
+VUDENC ships **no repository or commit metadata** (it is a curated corpus of
+functions, not a commit database), so `repo_url`, `commit_id`,
+`target_commit`, `cve_id`, `cvss_score`, `diff_with_context` and
+`fixed_code` are emitted as `None`/`""`/`0.0` — they are present for schema
+consistency and future traceability, not populated. Because there is no
+repo to clone, each project uses a `local_source` entry and `source_code`
+is embedded inline; the evaluation harness (`raw_score_extractor.py`)
+recognises this shape and materialises each snippet to its own file for
+scanning (the same inline path CVEfixes uses as its clone-failure fallback).
 
 Usage (HuggingFace — recommended, no download):
     pip install datasets
@@ -60,6 +99,16 @@ try:
     HF_AVAILABLE = True
 except ImportError:
     HF_AVAILABLE = False
+
+# data_quality lives in src/ — shared helpers that keep label noise out of the
+# corpus (duplicate / contradictory snippets, snippets with no real code).
+_SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+from data_quality import (  # noqa: E402
+    code_signal_line_count,
+    normalize_code,
+)
 
 # HuggingFace dataset ID for the VUDENC dataset
 HF_DATASET_ID = "DetectVul/Vudenc"
@@ -169,15 +218,25 @@ def _row_to_sample(row: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
 
     sample_id = f"vudenc::{vuln_type}::{index:06d}::{uuid.uuid4().hex[:6]}"
 
+    # VUDENC carries no repository / commit metadata, so the provenance
+    # fields are emitted empty for schema consistency with the CVEfixes
+    # manifest (convert_cvefixes.py) — they are simply never populated.
     return {
         "sample_id": sample_id,
-        "file_path": "inline_snippet.py",
+        "file_path": "inline_snippet.py",   # synthetic; source_code is embedded below
         "function_name": _infer_function_name(source_code),
         "start_line": 1,
         "end_line": max(len(raw_lines), 1),
         "label": function_label,
         "vulnerability_type": vuln_type,
         "source_code": source_code,
+        "fixed_code": None,
+        "repo_url": None,
+        "commit_id": None,
+        "target_commit": None,
+        "cve_id": None,
+        "cvss_score": 0.0,
+        "diff_with_context": "",
     }
 
 
@@ -201,6 +260,8 @@ def convert_vudenc(
     local_dir: Optional[str] = None,
     limit: Optional[int] = None,
     split: str = "train",
+    dedup: bool = True,
+    min_code_lines: int = 2,
 ) -> None:
     """Converts VUDENC into a CEVuD benchmark manifest.
 
@@ -213,6 +274,11 @@ def convert_vudenc(
         local_dir: If set, read from a local VUDENC clone instead of HF.
         limit: Maximum number of samples to include. None = all.
         split: HuggingFace split to use ('train' or 'test').
+        dedup: When True (default), drop duplicate snippets and any snippet
+            that collides (identical text) with a snippet of the OPPOSITE
+            label — those are hard contradictions the classifier cannot learn.
+        min_code_lines: Drop a snippet with fewer than this many lines of real
+            code signal (comments/docstrings/version assignments do not count).
     """
     row_stream = (
         _stream_local(local_dir) if local_dir else _stream_hf(split=split)
@@ -221,12 +287,35 @@ def convert_vudenc(
     # Group samples by vuln_type (used as "project" for split isolation)
     samples_by_project: Dict[str, List[Dict[str, Any]]] = {}
     total_added = total_skipped = 0
+    skipped_dup = skipped_contradiction = skipped_short = 0
+    # normalized source_code -> label, for duplicate / contradiction detection
+    seen_norm: Dict[str, int] = {}
 
     for idx, row in enumerate(row_stream):
         sample = _row_to_sample(row, idx)
         if sample is None:
             total_skipped += 1
             continue
+
+        # ── Minimum code-signal filter ───────────────────────────────────────
+        # A snippet with no real code (e.g. a lone ``__version__ = '3.7'``)
+        # carries no learnable signal and would add label noise.
+        if code_signal_line_count(sample["source_code"]) < min_code_lines:
+            skipped_short += 1
+            continue
+
+        # ── Duplicate / contradiction filter ─────────────────────────────────
+        # Identical text with different labels is a hard contradiction; identical
+        # text with the same label is just a redundant duplicate. Drop both.
+        norm = normalize_code(sample["source_code"])
+        if dedup and norm in seen_norm:
+            if seen_norm[norm] == sample["label"]:
+                skipped_dup += 1
+            else:
+                skipped_contradiction += 1
+            continue
+        if dedup:
+            seen_norm[norm] = sample["label"]
 
         vuln_type = sample["vulnerability_type"]
         project_key = f"vudenc_{vuln_type}"
@@ -241,6 +330,13 @@ def convert_vudenc(
             break
 
     # ── Assemble the manifest ────────────────────────────────────────────────
+    # Mirrors the CVEfixes manifest's per-project grouping, but each VUDENC
+    # "project" is a vulnerability category (e.g. vudenc_sql) rather than a
+    # git repository — VUDENC ships no repo/commit metadata to clone. The
+    # evaluation harness recognises this `local_source` shape and scores the
+    # embedded `source_code` directly (the same inline path CVEfixes uses as
+    # its clone-failure fallback). This keeps VUDENC and CVEfixes fully
+    # interchangeable downstream.
     manifest = [
         {
             "project": project_name,
@@ -260,8 +356,14 @@ def convert_vudenc(
     print(f"\n{'─'*60}")
     print(f"  Source        : {'HuggingFace ' + HF_DATASET_ID if not local_dir else local_dir}")
     print(f"  Samples added : {total_added:,}  ({vulnerable:,} vulnerable, {safe:,} safe)")
-    print(f"  Samples skip  : {total_skipped:,}  (empty / malformed rows)")
+    print(f"  Skipped empty : {total_skipped:,}  (empty / malformed rows)")
+    print(f"  Skipped dup   : {skipped_dup:,}  (duplicate snippets)")
+    print(f"  Skipped contra: {skipped_contradiction:,}  (identical text, both labels)")
+    print(f"  Skipped short : {skipped_short:,}  (< {min_code_lines} code-signal lines)")
     print(f"  Projects      : {len(manifest):,}  (one per vulnerability type)")
+    print(f"  Role          : gate-study corpus for src/evaluation/")
+    print(f"                 (classifier is trained/validated/evaluated on CVEfixes;")
+    print(f"                  VUDENC is the held-out corpus for the gate study)")
     for entry in manifest:
         v = sum(s["label"] for s in entry["samples"])
         print(f"    · {entry['project']:<35} {len(entry['samples']):>5} samples  ({v} vuln)")
@@ -308,6 +410,25 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["train", "test"],
         help="HuggingFace split to load. Default: train.",
     )
+    p.add_argument(
+        "--no-dedup",
+        dest="dedup",
+        action="store_false",
+        default=True,
+        help=(
+            "Disable duplicate / contradiction filtering (keeps identical "
+            "snippets and hard label contradictions)."
+        ),
+    )
+    p.add_argument(
+        "--min-code-lines",
+        type=int,
+        default=2,
+        help=(
+            "Drop a snippet with fewer than this many lines of real code "
+            "signal. Default: 2."
+        ),
+    )
     return p
 
 
@@ -318,4 +439,6 @@ if __name__ == "__main__":
         local_dir=args.local_dir,
         limit=args.limit,
         split=args.split,
+        dedup=args.dedup,
+        min_code_lines=args.min_code_lines,
     )
