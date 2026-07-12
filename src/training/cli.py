@@ -53,6 +53,12 @@ def _build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--epochs", type=int, default=None)
     tr.add_argument("--batch-size", type=int, default=None)
     tr.add_argument("--lr", type=float, default=None)
+    tr.add_argument("--freeze-backbone", action="store_true",
+                    help="Freeze CodeBERT, train only the classifier head (sample-efficient).")
+    tr.add_argument("--early-stopping-patience", type=int, default=None,
+                    help="Stop after N epochs without val-loss improvement (default 3).")
+    tr.add_argument("--early-stopping-threshold", type=float, default=None,
+                    help="Min val-loss improvement to count as progress (default 0.0).")
 
     # ── evaluate ────────────────────────────────────────────────────────────
     ev = sub.add_parser("evaluate", help="Evaluate a trained model on the test split")
@@ -70,6 +76,12 @@ def _build_parser() -> argparse.ArgumentParser:
     ra.add_argument("--max-samples-per-class", type=int, default=None)
     ra.add_argument("--max-samples-per-cwe", type=int, default=None)
     ra.add_argument("--max-total", type=int, default=None)
+    ra.add_argument("--freeze-backbone", action="store_true",
+                    help="Freeze CodeBERT, train only the classifier head (sample-efficient).")
+    ra.add_argument("--early-stopping-patience", type=int, default=None,
+                    help="Stop after N epochs without val-loss improvement (default 3).")
+    ra.add_argument("--early-stopping-threshold", type=float, default=None,
+                    help="Min val-loss improvement to count as progress (default 0.0).")
 
     return p
 
@@ -104,6 +116,11 @@ def cmd_train(args, cfg: TrainingConfig) -> None:
         cfg.batch_size = args.batch_size
     if args.lr is not None:
         cfg.learning_rate = args.lr
+    cfg.freeze_backbone = args.freeze_backbone
+    if args.early_stopping_patience is not None:
+        cfg.early_stopping_patience = args.early_stopping_patience
+    if args.early_stopping_threshold is not None:
+        cfg.early_stopping_threshold = args.early_stopping_threshold
     train(cfg)
 
 

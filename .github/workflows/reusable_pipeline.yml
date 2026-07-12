@@ -25,6 +25,8 @@ on:
         required: false
       GOOGLE_API_KEY:
         required: false
+      UNIPASSAU_API_KEY:
+        required: false
 
 jobs:
   security-triage:

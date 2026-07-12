@@ -2,15 +2,24 @@
 
 ## Overview
 
-CEVuD's training pipeline uses a **few-shot, no-augmentation** approach to fine-tune a
-small CodeBERT-based classifier on the existing CVEFixes benchmark. Instead of
-training on the full 1,538-sample dataset, we select a **small, balanced, credible
-subset** — preserving the original, real-world ground truth — and optimize the
-pipeline for fast iteration and reproducibility.
+CEVuD's training pipeline fine-tunes a small CodeBERT-based classifier
+(`microsoft/codebert-base`, ~125M params) on the existing CVEFixes benchmark. It
+supports two regimes:
 
-The result is a custom model (`microsoft/codebert-base`, ~125M params) that
-produces `P(vulnerable) ∈ [0, 1]` and can be dropped into `config.json` as the new
-Stage-2 local classifier with zero code changes.
+* **Quick smoke test (`--few-shot`)** — a small, balanced, credible subset
+  (~100 samples). Good for verifying the pipeline end-to-end, but **too small to
+  learn anything useful** (a 125M-param model needs far more signal). Treat its
+  metrics as a pipeline sanity check, not a usable model.
+* **Real training** — build on a large slice of the full 1,538-sample manifest.
+  This is what produces a model worth deploying.
+
+The pipeline uses **class-weighted loss** to counter vulnerability-class
+imbalance, and offers a **frozen-backbone mode** (`--freeze-backbone`) that trains
+only the classifier head on frozen CodeBERT embeddings — far more sample-efficient
+and stable when data is limited, and much faster to train.
+
+The trained model produces `P(vulnerable) ∈ [0, 1]` and can be dropped into
+`config.json` as the new Stage-2 local classifier with zero code changes.
 
 ## Directory Layout
 
@@ -50,9 +59,19 @@ pip install -r requirements.txt
 Key dependencies: `torch`, `transformers`, `scikit-learn`, `matplotlib`,
 `git` (for cloning repos during dataset construction).
 
-## Step 1 — Build a Small, Balanced Dataset
+## Step 1 — Build the Dataset
 
-### The Few-Shot Strategy
+### Two regimes
+
+* **Quick smoke test (`--few-shot`)** — ~100 samples to verify the pipeline.
+  The model trained on this is **not** good enough to deploy; use it only to
+  confirm the pipeline runs end-to-end.
+* **Real training (recommended)** — build on a large slice of the full
+  manifest. The more projects/samples you include, the better the model.
+  Because clones are deleted immediately after enrichment, disk usage is just
+  the JSONL files, so building large datasets is safe.
+
+### The Few-Shot Strategy (smoke test only)
 
 We do **not** augment the data. We use the existing `benchmark_manifest_cvefixes.json`
 as-is and apply **strategic capping** to create a small, credible subset:
@@ -72,21 +91,25 @@ as-is and apply **strategic capping** to create a small, credible subset:
 All caps are applied **before** splitting, so class balance is preserved across
 train/val/test. Splitting is done at the **project level** to prevent data leakage.
 
-### CLI — Quick Few-Shot Build
+### CLI — Build
 
 ```bash
-# Recommended starting point: 20 projects, 50 vuln + 50 safe (~100 samples total)
-python -m training.cli build-dataset --few-shot --max-workers 8
+# SMOKE TEST (~100 samples, pipeline check only — do NOT deploy this model):
+python -m src.training.cli build-dataset --few-shot --max-workers 8
 
-# Customize the caps:
-python -m training.cli build-dataset \
-  --max-projects 30 \
-  --max-samples-per-class 100 \
-  --max-total 1000 \
+# REAL TRAINING (recommended): build on a large slice of the manifest.
+# No --few-shot -> uses all projects/samples (cap with --max-projects to bound time).
+python -m src.training.cli build-dataset --max-workers 8
+
+# Medium dataset, capped for faster iteration:
+python -m src.training.cli build-dataset \
+  --max-projects 100 \
+  --max-samples-per-class 200 \
+  --max-total 800 \
   --max-workers 8
 
 # Include cross-file context (slower but more signal):
-python -m training.cli build-dataset --few-shot --cross-file --max-workers 8
+python -m src.training.cli build-dataset --cross-file --max-workers 8
 ```
 
 ### What the builder does
@@ -116,7 +139,7 @@ python -m training.cli build-dataset --few-shot --cross-file --max-workers 8
 If you run:
 
 ```bash
-python -m training.cli build-dataset --few-shot
+python -m src.training.cli build-dataset --few-shot
 ```
 
 You might see:
@@ -157,32 +180,50 @@ samples to hit your few-shot budget.
 
 ## Step 2 — Fine-Tune CodeBERT
 
-### Recommended few-shot hyperparameters
+### Getting a usable model
 
-Few-shot learning with CodeBERT (125M params) works best with:
-- **Fewer epochs** (2–3) to avoid overfitting on small data
-- **Smaller batch size** (4–8 on CPU) for stable gradients
-- **Lower learning rate** (1e-5 to 2e-5) to preserve pre-trained knowledge
-- **Higher warmup** (10–20%) because small batches have noisy gradients
+A 125M-param model cannot learn from ~40 training samples. For a model worth
+deploying, **build on a large dataset (Step 1, no `--few-shot`)** and:
+
+- **Train longer** — `num_epochs` defaults to 20; **early stopping** ends
+  training automatically once validation loss stops improving (patience 3 by
+  default), so you can set a high epoch ceiling without wasting compute.
+- **Class-weighted loss** (always on) counteracts vulnerability-class imbalance.
+- **Frozen-backbone (`--freeze-backbone`)** when data is still limited: trains
+  only the classifier head on frozen CodeBERT embeddings. This is far more
+  sample-efficient and stable than full fine-tuning on small data, and trains
+  much faster (good for the constrained host). With a large dataset, full
+  fine-tuning (`--freeze-backbone` off) is stronger.
 
 ```bash
-python -m training.cli train --epochs 3 --batch-size 8 --lr 2e-5
+# Real training on a large dataset (full fine-tune, early-stopped on val loss):
+python -m src.training.cli train --epochs 20 --batch-size 8 --lr 2e-5
+
+# Customise early stopping:
+python -m src.training.cli train --epochs 40 --early-stopping-patience 5
+
+# Sample-efficient alternative for smaller datasets:
+python -m src.training.cli train --freeze-backbone --epochs 20 --batch-size 8 --lr 2e-5
 ```
 
 ### Hyperparameters
 
-| Parameter                  | Default (few-shot) | Description                            |
+| Parameter                  | Default            | Description                            |
 |----------------------------|--------------------|----------------------------------------|
 | `base_model`               | `microsoft/codebert-base` | Base encoder (~125M params) |
 | `max_length`               | 512                | Tokenizer truncation length            |
 | `batch_size`               | 8                  | Per-device batch size (CPU-safe)       |
 | `learning_rate`            | 2e-5               | AdamW learning rate                    |
-| `num_epochs`               | 3                  | Full passes over training data         |
+| `num_epochs`               | 20                 | Max passes over training data (early stopping usually ends sooner) |
 | `warmup_ratio`             | 0.1                | Linear warm-up proportion              |
 | `gradient_accumulation`    | 1                  | Steps before optimizer update          |
 | `weight_decay`             | 0.01               | L2 regularization                      |
+| `freeze_backbone`          | `False`            | Train only the classifier head         |
+| `early_stopping_patience`  | 3                  | Epochs w/o val-loss improvement before stopping |
+| `early_stopping_threshold` | 0.0                | Min val-loss drop to count as progress |
 
-The `Trainer` saves the best checkpoint (by validation F1) to
+The `Trainer` selects and restores the **best checkpoint by validation loss**
+(`eval_loss`) and stops early when val loss plateaus, saving it to
 `training_output/run_<timestamp>/model/`.
 
 ### Expected training time (few-shot)
@@ -201,7 +242,7 @@ Reduce `--batch-size` to 4 or 2 if memory is constrained.
 ## Step 3 — Evaluate
 
 ```bash
-python -m training.cli evaluate
+python -m src.training.cli evaluate
 ```
 
 This loads the best checkpoint, runs inference on the held-out test split,
@@ -362,13 +403,12 @@ All randomness is controlled:
 | Model init + dropout | 42   |
 | Training shuffle     | 42   |
 
-To reproduce a specific few-shot run:
+To reproduce a full training run:
 
 ```bash
-python -m training.cli run-all \
-  --few-shot \
+python -m src.training.cli run-all \
   --max-workers 4 \
-  --epochs 3 \
+  --epochs 5 \
   --batch-size 8
 ```
 

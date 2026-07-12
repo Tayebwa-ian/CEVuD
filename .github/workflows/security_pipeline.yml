@@ -57,7 +57,7 @@ jobs:
           docker run --rm \
             -e GITHUB_RUN_ID="run_${{ github.sha }}" \
             -v ${{ github.workspace }}:/workspace \
-            ${{ steps.image.outputs.image }}:latest python src/triage_orchestrator.py --workspace /workspace --exclude-dirs "workspace_storage,tests,src"
+            ${{ steps.image.outputs.image }}:latest python /app/src/triage_orchestrator.py --workspace /workspace --config /app/config.json --exclude-dirs "workspace_storage,tests,src"
 
       - name: Execute Stage 3 (DeepAgent Context Analysis & Synthesis)
         if: always()
@@ -73,7 +73,7 @@ jobs:
             -e GOOGLE_API_KEY \
             -e UNIPASSAU_API_KEY \
             -v ${{ github.workspace }}:/workspace \
-            ${{ steps.image.outputs.image }}:latest python src/agent.py --workspace /workspace
+            ${{ steps.image.outputs.image }}:latest python /app/src/agent.py --workspace /workspace --config /app/config.json
 
       - name: Move Runtime Outputs to Systematic Artifact Cache Location
         if: always()

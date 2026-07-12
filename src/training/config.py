@@ -20,10 +20,18 @@ class TrainingConfig:
     batch_size: int = 8
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
-    num_epochs: int = 3
+    # High default so training runs until early stopping (on val loss) halts it.
+    num_epochs: int = 20
     warmup_ratio: float = 0.1
     seed: int = 42
     gradient_accumulation_steps: int = 1
+    # When True, freeze the CodeBERT backbone and train only the classifier
+    # head — far more sample-efficient and stable for small datasets.
+    freeze_backbone: bool = False
+    # Early stopping: halt once validation loss fails to improve for this many
+    # consecutive evaluations. Best checkpoint (by val loss) is restored.
+    early_stopping_patience: int = 3
+    early_stopping_threshold: float = 0.0
 
     # ── Data paths ─────────────────────────────────────────────────────────
     manifest_path: str = "benchmark_manifest_cvefixes.json"
