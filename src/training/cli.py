@@ -86,7 +86,7 @@ def cmd_build_dataset(args, cfg: TrainingConfig) -> None:
 
     build_dataset(
         manifest_path=args.manifest or cfg.manifest_path,
-        output_dir=args.output_dir or Path(cfg.output_dir) / "data",
+        output_dir=args.output_dir or "training_data",
         max_projects=max_projects,
         max_workers=args.max_workers or cfg.max_workers,
         include_cross_file=args.cross_file or cfg.include_cross_file,

@@ -17,3 +17,4 @@ benchmark_manifest*
 workspace_storage_e2e
 .kilo
 .training_cache/*
+.vscode/*
