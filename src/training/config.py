@@ -46,12 +46,25 @@ class TrainingConfig:
     test_fraction: float = 0.2
     split_seed: int = 42
 
+    # Set by run_dir on first access; persisted for the lifetime of the
+    # process so train -> evaluate (run-all) agree on the same output dir.
+    _run_dir: Path | None = field(default=None, init=False, repr=False)
+
     @property
     def device(self) -> torch.device:
-        return torch.device("cpu")
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     @property
     def run_dir(self) -> Path:
-        import datetime
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        return Path(self.output_dir) / f"run_{ts}"
+        if self._run_dir is None:
+            import datetime
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._run_dir = Path(self.output_dir) / f"run_{ts}"
+        return self._run_dir
+
+    @property
+    def latest_dir(self) -> Path:
+        """Stable path (a symlink maintained by the trainer) to the most
+        recent run, so `evaluate` and deployment can locate the model without
+        knowing the timestamped run directory."""
+        return Path(self.output_dir) / "latest"

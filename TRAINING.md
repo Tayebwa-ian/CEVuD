@@ -75,7 +75,7 @@ train/val/test. Splitting is done at the **project level** to prevent data leaka
 ### CLI — Quick Few-Shot Build
 
 ```bash
-# Recommended starting point: 20 projects, 50 vuln + 50 safe, ~500 total
+# Recommended starting point: 20 projects, 50 vuln + 50 safe (~100 samples total)
 python -m training.cli build-dataset --few-shot --max-workers 8
 
 # Customize the caps:
@@ -122,9 +122,9 @@ You might see:
 
 ```
 [*] Building dataset from 20 projects ...
-[+] train       :  210 samples -> training_data/train.jsonl
-[+] validation  :   70 samples -> training_data/val.jsonl
-[+] test        :   70 samples -> training_data/test.jsonl
+[+] train       :   60 samples -> training_data/train.jsonl
+[+] validation  :   20 samples -> training_data/val.jsonl
+[+] test        :   20 samples -> training_data/test.jsonl
 
 [+] Dataset summary -> training_data/dataset_summary.json
 ```
@@ -133,17 +133,23 @@ And `dataset_summary.json`:
 
 ```json
 {
-  "total_samples": 350,
+  "total_samples": 100,
   "projects_processed": 20,
-  "label_distribution": {"vulnerable": 175, "safe": 175},
+  "label_distribution": {"vulnerable": 50, "safe": 50},
   "unique_cwe_types": 45,
-  "cwe_coverage": {"CWE-617": 28, "CWE-476": 16, ...},
-  "split_sizes": {"train": 210, "validation": 70, "test": 70},
+  "cwe_coverage": {"CWE-617": 6, "CWE-476": 4, ...},
+  "split_sizes": {"train": 60, "validation": 20, "test": 20},
   "avg_context_lines": 62.1,
   "capped_from": 780,
-  "capped_to": 350
+  "capped_to": 100
 }
 ```
+
+The `--few-shot` defaults apply a **per-class cap of 50** (`--max-samples-per-class 50`),
+so the resulting set is bounded to ~100 samples (50 vulnerable + 50 safe) regardless of
+`--max-total 500` (which acts only as a hard safety ceiling). To build a larger few-shot
+set, raise `--max-samples-per-class` and/or `--max-projects` (e.g. `--max-samples-per-class 250`
+approaches a ~500-sample balanced set).
 
 The `capped_from` / `capped_to` fields confirm the builder selected and trimmed
 samples to hit your few-shot budget.
@@ -235,6 +241,10 @@ and writes:
 
 > `ModelManager` auto-detects softmax vs multi-label scoring from the model
 > config, so no code changes are needed.
+>
+> The trainer automatically maintains a `training_output/latest` symlink that
+> points at the most recent timestamped run directory, so this path always
+> resolves to the freshest model. `evaluate` also defaults to this path.
 
 ### Option B: Bake into the Docker image
 

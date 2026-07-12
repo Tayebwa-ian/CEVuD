@@ -111,10 +111,14 @@ def compute_metrics(eval_pred) -> Dict[str, Any]:
 def train(cfg: TrainingConfig) -> Dict[str, Any]:
     set_seed(cfg.seed)
 
+    device = cfg.device
+    use_cpu = device.type == "cpu"
+
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model)
     model = AutoModelForSequenceClassification.from_pretrained(
         cfg.base_model, num_labels=cfg.num_labels
     )
+    model.to(device)
 
     train_ds = VulnerabilityDataset(cfg.train_path, tokenizer, cfg.max_length)
     val_ds = VulnerabilityDataset(cfg.val_path, tokenizer, cfg.max_length)
@@ -140,7 +144,7 @@ def train(cfg: TrainingConfig) -> Dict[str, Any]:
         seed=cfg.seed,
         gradient_accumulation_steps=cfg.gradient_accumulation_steps,
         report_to="none",
-        use_cpu=True,
+        use_cpu=use_cpu,
     )
 
     trainer = Trainer(
@@ -158,6 +162,20 @@ def train(cfg: TrainingConfig) -> Dict[str, Any]:
     # ── Persist artifacts ────────────────────────────────────────────────────
     tokenizer.save_pretrained(str(model_dir))
     trainer.save_model(str(model_dir))
+
+    # Keep a stable `latest` symlink so `evaluate` / deployment can find the
+    # freshest model without knowing the timestamped run directory.
+    latest_link = Path(cfg.output_dir) / "latest"
+    if latest_link.is_symlink() or latest_link.exists():
+        try:
+            latest_link.unlink()
+        except OSError:
+            pass
+    try:
+        rel_target = os.path.relpath(run_dir, latest_link.parent)
+        latest_link.symlink_to(rel_target, target_is_directory=True)
+    except OSError:
+        pass
 
     summary = {
         "train_samples": len(train_ds),

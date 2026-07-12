@@ -108,9 +108,12 @@ def cmd_train(args, cfg: TrainingConfig) -> None:
 
 
 def cmd_evaluate(args, cfg: TrainingConfig) -> None:
-    model_path = args.model_path or str(cfg.run_dir / "model")
+    # Default to the stable `latest` symlink (see trainer.py) so a standalone
+    # `evaluate` invocation finds the most recent model even though run_dir is
+    # timestamped per process.
+    model_path = args.model_path or str(cfg.latest_dir / "model")
     test_path = args.test_path or cfg.test_path
-    out_dir = args.output_dir or str(cfg.run_dir / "eval")
+    out_dir = args.output_dir or str(cfg.latest_dir / "eval")
     evaluate(
         model_path=model_path,
         test_path=test_path,
