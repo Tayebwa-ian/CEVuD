@@ -354,6 +354,30 @@ def _split_key(project_name: str) -> str:
     return project_name[len("benign::"):] if project_name.startswith("benign::") else project_name
 
 
+def _allocate_class(
+    keys: List[str],
+    assigned: Dict[str, List[str]],
+    targets: Dict[str, int],
+    rng: "random.Random",
+) -> None:
+    """Place ``keys`` (all of one class) across splits so each split receives a
+    count proportional to its target size (max-deficit greedy). Allocating the
+    vulnerable pool and the safe-only pool *separately* guarantees every split
+    gets a share of BOTH classes — so the largest split can no longer swallow
+    the whole majority class and leave itself single-class (the previous bug,
+    where 'train' ended up 100% vulnerable)."""
+    if not keys:
+        return
+    rng.shuffle(keys)
+    total_target = sum(targets.values())
+    desired = {sp: targets[sp] * len(keys) / total_target for sp in targets}
+    have = {sp: 0 for sp in targets}
+    for k in keys:
+        best = max(targets, key=lambda sp: desired[sp] - have[sp])
+        assigned[best].append(k)
+        have[best] += 1
+
+
 def assign_splits(
     enriched: List[EnrichedSample],
     val_fraction: float = 0.2,
@@ -365,12 +389,12 @@ def assign_splits(
     # repo's vulnerable + mined-safe samples never straddle the split boundary.
     keys = list({_split_key(s.project) for s in enriched})
 
-    # Class-presence per repo key (after any upstream filtering). A repo key may
-    # end up "safe-only" if its only vulnerable sample was dropped as low-signal,
-    # in which case a naive random split could yield a single-class split and a
-    # useless (ROC-undefined) eval. We therefore SEED every split with at least
-    # one repo key that still contains a vulnerable sample, then fill the rest
-    # toward the requested train/val/test fractions.
+    # Split each CLASS independently and proportionally. A repo key may be
+    # "safe-only" if its only vulnerable sample was dropped as low-signal; by
+    # allocating vulnerable repo-keys and safe-only repo-keys as two SEPARATE
+    # pools (each spread across splits by target weight), every split receives
+    # BOTH a vulnerable repo and a safe repo -> a guaranteed two-class split,
+    # while the overall 60/20/20 (train/val/test) ratio is preserved.
     has_vuln: set = {_split_key(s.project) for s in enriched if s.label == 1}
     vuln_keys = [k for k in keys if k in has_vuln]
     safe_keys = [k for k in keys if k not in has_vuln]
@@ -387,30 +411,8 @@ def assign_splits(
     order = ["train", "validation", "test"]
 
     assigned: Dict[str, List[str]] = {sp: [] for sp in order}
-    # Seed each split with one vulnerable repo key (guarantees a two-class split
-    # as long as we have >= 3 vulnerable repo keys; true for the full corpus).
-    vuln_iter = iter(vuln_keys)
-    for sp in order:
-        try:
-            assigned[sp].append(next(vuln_iter))
-        except StopIteration:
-            pass  # not enough vulnerable repos; the single-class guard catches this
-    seeded = {k for v in assigned.values() for k in v}
-    remaining_vuln = [k for k in vuln_keys if k not in seeded]
-
-    # Fill each split toward its target, always topping up the split with the
-    # most remaining capacity so the requested fractions are approximately kept.
-    remaining = {sp: targets[sp] - len(assigned[sp]) for sp in order}
-    pool = remaining_vuln + safe_keys
-    rng.shuffle(pool)
-    for k in pool:
-        best = max(
-            (sp for sp in order if remaining[sp] > 0),
-            key=lambda sp: (remaining[sp], -order.index(sp)),
-            default="train",
-        )
-        assigned[best].append(k)
-        remaining[best] -= 1
+    _allocate_class(vuln_keys, assigned, targets, rng)
+    _allocate_class(safe_keys, assigned, targets, rng)
 
     assignment: Dict[str, str] = {}
     for s in enriched:
