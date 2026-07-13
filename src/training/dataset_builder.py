@@ -361,17 +361,37 @@ def _allocate_class(
     rng: "random.Random",
 ) -> None:
     """Place ``keys`` (all of one class) across splits so each split receives a
-    count proportional to its target size (max-deficit greedy). Allocating the
-    vulnerable pool and the safe-only pool *separately* guarantees every split
-    gets a share of BOTH classes — so the largest split can no longer swallow
-    the whole majority class and leave itself single-class (the previous bug,
-    where 'train' ended up 100% vulnerable)."""
+    count proportional to its target size (max-deficit greedy), *after* first
+    seeding every split with one key of this class when there are enough keys.
+
+    The seeding step is what guarantees a two-class split. Without it, the
+    proportional allocator sends the few vulnerable repos to the split with the
+    largest target share (train) and the smaller splits (val/test) can end up
+    with *only* the majority (safe) class — the exact single-class failure the
+    guard below rejects. Seeding every split with >=1 key of each class keeps
+    the 60/20/20 ratio for the remainder while ensuring no split is degenerate.
+    """
     if not keys:
         return
     rng.shuffle(keys)
     total_target = sum(targets.values())
+    splits = list(targets.keys())
+
+    # Seed each split with one key of this class (when we have at least one key
+    # per split) so every split is guaranteed to contain this class.
+    seeded = 0
+    for sp in splits:
+        if not keys:
+            break
+        assigned[sp].append(keys.pop(0))
+        seeded += 1
+
+    # Distribute the remainder proportionally by max-deficit greedy. The seeded
+    # keys already count toward each split's share of this class.
+    have = {sp: 1 if i < seeded else 0 for i, sp in enumerate(splits)}
+    if not keys:
+        return
     desired = {sp: targets[sp] * len(keys) / total_target for sp in targets}
-    have = {sp: 0 for sp in targets}
     for k in keys:
         best = max(targets, key=lambda sp: desired[sp] - have[sp])
         assigned[best].append(k)
@@ -549,6 +569,69 @@ def _drop_near_duplicate_safe(
     return kept, dropped
 
 
+def _discover_benign_manifest(manifest_path: str) -> Optional[str]:
+    """Look for a benign-control manifest next to the primary manifest or in
+    the CWD so ``build-dataset`` works without an explicit ``--benign-manifest``.
+
+    The CVEfixes converter emits *vulnerable-only* samples by default (the safe
+    class must be mined separately, see docs/SAFE_COUNTERPARTS.md). If a
+    ``benign_controls_manifest.json`` was produced earlier it should be reused
+    instead of failing the two-class split guard.
+    """
+    base = os.path.dirname(os.path.abspath(manifest_path))
+    cwd = os.getcwd()
+    candidates = [
+        os.path.join(base, "benign_controls_manifest.json"),
+        os.path.join(cwd, "benign_controls_manifest.json"),
+    ]
+    manifest_abs = os.path.abspath(manifest_path)
+    for c in candidates:
+        c_abs = os.path.abspath(c)
+        if c_abs != manifest_abs and os.path.exists(c_abs):
+            return c_abs
+    return None
+
+
+def _auto_generate_benign_manifest(
+    primary_manifest_path: str, output_dir: str
+) -> Optional[str]:
+    """Best-effort: mine verified-benign controls so the dataset has a real
+    safe class. Only invoked when no benign manifest is supplied and the
+    enriched pool turns out to be single-class. Returns the path to the
+    generated manifest, or ``None`` if mining failed (e.g. no network).
+    """
+    try:
+        scripts_dir = os.path.join(_SRC_DIR, "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import mine_benign_functions as mbf  # noqa: F401
+
+        auto_dir = os.path.join(
+            os.path.dirname(os.path.abspath(output_dir)), ".training_cache"
+        )
+        os.makedirs(auto_dir, exist_ok=True)
+        auto_path = os.path.join(auto_dir, "auto_benign_manifest.json")
+        print(
+            "[*] Manifest has no safe class — auto-mining verified-benign "
+            "controls (this clones repos; needs network/git) ..."
+        )
+        mbf.mine_benign(
+            primary_manifest_path,
+            auto_path,
+            samples_per_commit=8,
+            max_commits=50,
+            max_workers=6,
+            ratio=3.0,
+            min_code_lines=2,
+            seed=42,
+        )
+        if os.path.exists(auto_path):
+            return auto_path
+    except Exception as exc:  # pragma: no cover - best effort
+        print(f"[!] Auto benign-mining failed ({exc}); a safe class is required.")
+    return None
+
+
 def build_dataset(
     manifest_path: str,
     output_dir: str = "training_data",
@@ -601,6 +684,24 @@ def build_dataset(
     """
     cache_root = Path(".training_cache") / "clones"
     os.makedirs(str(cache_root), exist_ok=True)
+
+    # ── Ensure a safe class is available ─────────────────────────────────────
+    # The CVEfixes converter emits vulnerable-only samples by default; the safe
+    # class must come from verified-benign controls (docs/SAFE_COUNTERPARTS.md).
+    # If the caller did not pass --benign-manifest, first try to reuse one that
+    # was produced earlier (benign_controls_manifest.json), then fall back to
+    # auto-mining it. This keeps `build-dataset` from erroring with a confusing
+    # single-class-split message when the only problem is a missing safe class.
+    if benign_manifest_path is None:
+        discovered = _discover_benign_manifest(manifest_path)
+        if discovered:
+            benign_manifest_path = discovered
+            print(f"[*] No --benign-manifest given; reusing discovered: {benign_manifest_path}")
+    if benign_manifest_path is None:
+        auto = _auto_generate_benign_manifest(manifest_path, output_dir)
+        if auto:
+            benign_manifest_path = auto
+            print(f"[*] Using auto-mined benign controls: {benign_manifest_path}")
 
     projects = load_manifest(manifest_path)
     benign_projects: List = []
@@ -762,6 +863,25 @@ def build_dataset(
     if cap_before != cap_after:
         print(f"[*] Capped samples: {cap_before} -> {cap_after}")
 
+    # ── Whole-corpus single-class guard (fail fast with a clear message) ──────
+    # If after filtering + chunking every surviving sample shares one label,
+    # there is nothing to split into a two-class train/val/test set. The usual
+    # cause is a missing safe class (the CVEfixes converter is vulnerable-only
+    # by default), which the auto-mine above should have prevented — but if
+    # mining failed (no network) we say so plainly instead of blaming the
+    # benign:: prefix collapse.
+    all_labels = {s.label for s in enriched}
+    if len(all_labels) < 2:
+        only = next(iter(all_labels))
+        present = "vulnerable" if only == 1 else "safe"
+        raise ValueError(
+            f"Cannot build two-class splits: the enriched corpus contains only "
+            f"{present} samples (label {only}). The CVEfixes converter emits "
+            f"vulnerable-only by default; supply a safe class via "
+            f"--benign-manifest (or run src/scripts/mine_benign_functions.py). "
+            f"See docs/SAFE_COUNTERPARTS.md."
+        )
+
     assignment = assign_splits(enriched, val_fraction, test_fraction, split_seed)
 
     splits: Dict[str, List[EnrichedSample]] = {"train": [], "validation": [], "test": []}
@@ -784,11 +904,13 @@ def build_dataset(
             raise ValueError(
                 f"Split '{split_name}' contains ONLY {present} samples "
                 f"({len(samples)} total). Every split must be two-class for a "
-                f"meaningful ROC/PR. This means either benign::<repo> and <repo> "
-                f"were split apart (ensure assign_splits collapses the 'benign::' "
-                f"prefix), or all vulnerable samples in this split's repos were "
-                f"filtered out upstream (reduce low-signal dropping or add more "
-                f"vulnerable repos)."
+                f"meaningful ROC/PR. This usually means a repo's vulnerable and "
+                f"mined-safe samples ended up in different splits (assign_splits "
+                f"collapses the 'benign::' prefix onto the underlying repo to "
+                f"prevent this), or every vulnerable sample in this split's repos "
+                f"was dropped upstream by the low-signal filter. Reduce "
+                f"low-signal dropping, or add more vulnerable repos / benign "
+                f"controls."
             )
 
     for split_name, samples in splits.items():

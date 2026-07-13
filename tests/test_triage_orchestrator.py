@@ -32,10 +32,16 @@ TEST_CONFIG = {
 @pytest.fixture
 def temp_workspace():
     """Create a temporary workspace directory for testing."""
-    with tempfile.TemporaryDirectory() as temp_dir:
-        # Create required directory structure
-        artifacts_dir = os.path.join(temp_dir, "artifacts", "run_local-dev-run")
-        os.makedirs(artifacts_dir, exist_ok=True)
+    # Pin a deterministic run id so the artifact directory is predictable.
+    # run_context.resolve_run_id prefers CEVUD_RUN_ID and otherwise persists a
+    # generated id; we set it here so Stage 2/3 agree within the test.
+    saved_run_id = os.environ.get("CEVUD_RUN_ID")
+    os.environ["CEVUD_RUN_ID"] = "run_test"
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create required directory structure
+            artifacts_dir = os.path.join(temp_dir, "artifacts", "run_test")
+            os.makedirs(artifacts_dir, exist_ok=True)
         
         # Create a sample source file
         source_file = os.path.join(temp_dir, "test_file.py")
@@ -90,6 +96,11 @@ def safe_function():
             "source_file": source_file,
             "artifacts_dir": artifacts_dir
         }
+    finally:
+        if saved_run_id is None:
+            os.environ.pop("CEVUD_RUN_ID", None)
+        else:
+            os.environ["CEVUD_RUN_ID"] = saved_run_id
 
 @pytest.fixture
 def triage_orchestrator(temp_workspace):
@@ -108,7 +119,7 @@ def test_triage_orchestrator_initialization(temp_workspace):
     
     assert orchestrator.config == TEST_CONFIG
     assert orchestrator.workspace_path == temp_workspace["workspace"]
-    assert orchestrator.artifact_dir == os.path.join(temp_workspace["workspace"], "artifacts", "run_local-dev-run")
+    assert orchestrator.artifact_dir == os.path.join(temp_workspace["workspace"], "artifacts", "run_test")
     assert isinstance(orchestrator.model_manager, ModelManager)
 
 def test_extract_source_snippet_function_scope(temp_workspace):

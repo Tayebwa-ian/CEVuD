@@ -115,15 +115,16 @@ def test_e2e_stage1_and_stage2(e2e_workspace, e2e_config, gold_standard_path):
     # 3. The evaluator already ran TriageOrchestrator live (Step 2 of
     #    run_evaluation) on the benchmark dir that actually holds the
     #    case_*.py source files, and mirrored its artifacts into the
-    #    workspace artifact dir (artifacts/run_local-dev-run/). Do NOT
+    #    workspace artifact dir (artifacts/<run_id>/). Do NOT
     #    re-run process_pipeline() here: run_evaluation's `finally`
     #    block already rmtree'd that benchmark dir, so a second pass
     #    would find no source files, skip every finding, and
     #    overwrite the good triage with an empty one -- which is
     #    exactly what Stage-3 then reads and halts on.
-    run_id = os.getenv("GITHUB_SHA") or os.getenv("GITHUB_RUN_ID") or "local-dev-run"
-    if not run_id.startswith("run_"):
-        run_id = f"run_{run_id}"
+    #    Resolve the run id the same way the pipeline does (run_context)
+    #    so we look in the right artifact folder.
+    from run_context import resolve_run_id
+    run_id = resolve_run_id(e2e_workspace, e2e_workspace)
     triage_path = os.path.join(
         e2e_workspace, "artifacts", run_id,
         e2e_config and json.load(open(e2e_config))["paths"]["triage_report"]

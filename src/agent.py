@@ -9,6 +9,7 @@ from deepagents import create_deep_agent
 from llm_factory import LLMFactory
 from vector_store import LocalVectorStore
 from model_manager import ModelManager  # ✅ Centralized model access
+from run_context import resolve_run_id
 
 
 class DeepAppSecAgent:
@@ -50,12 +51,13 @@ class DeepAppSecAgent:
         self.vector_store = LocalVectorStore(config_path, self.workspace_path)
 
         # Keep the run-id resolution IDENTICAL to src/triage_orchestrator.py so
-        # Stage 2 and Stage 3 always agree on the artifact directory. (Stage 2
-        # prefers GITHUB_RUN_ID; this must match or the ledger written by Stage 2
-        # is never found by Stage 3.)
-        self.run_id = os.getenv("GITHUB_RUN_ID") or os.getenv("GITHUB_SHA") or "local-dev-run"
-        if not self.run_id.startswith("run_"):
-            self.run_id = f"run_{self.run_id}"
+        # Stage 2 and Stage 3 always agree on the artifact directory. Both now
+        # delegate to run_context.resolve_run_id, which prefers the CEVUD_RUN_ID
+        # env var, falls back to a persisted marker in the workspace, and finally
+        # generates a unique id — so the ledger written by Stage 2 is always
+        # found by Stage 3.
+        ws_root = self.config["paths"].get("workspace_root", "workspace_storage")
+        self.run_id = resolve_run_id(self.workspace_path, ws_root)
         self.config_path = config_path
 
         # Resolve workspace_root path configurations dynamically

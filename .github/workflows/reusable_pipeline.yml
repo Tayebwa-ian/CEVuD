@@ -28,6 +28,12 @@ on:
       UNIPASSAU_API_KEY:
         required: false
 
+# CEVUD_RUN_ID is the single source of truth for the artifact directory. It is
+# set once here and passed into every stage (Stage 1/2/3) so they all write
+# to / read from the same run-scoped folder. See src/run_context.py.
+env:
+  CEVUD_RUN_ID: run_${{ github.run_id }}
+
 jobs:
   security-triage:
     runs-on: ubuntu-latest
@@ -51,11 +57,8 @@ jobs:
       - name: Initialize Environment Workspace Directories
         run: |
           mkdir -p workspace_storage/codebase_vectors 
-          mkdir -p workspace_storage/artifacts/run_${{ github.sha }}
+          mkdir -p "workspace_storage/artifacts/${CEVUD_RUN_ID}"
 
-
-
-      # --- ✅ NEW: Login to GHCR and Pull Pre-Built Image ---
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -75,18 +78,18 @@ jobs:
 
       - name: Execute Stage 1 (Static Analysis Engine Capture)
         run: |
+          RUN_DIR="workspace_storage/artifacts/${CEVUD_RUN_ID}"
+          mkdir -p "$RUN_DIR"
           docker run --rm \
+            -e CEVUD_RUN_ID="${CEVUD_RUN_ID}" \
             -v ${{ github.workspace }}:/workspace \
             ${{ steps.image.outputs.image }}:latest \
-            semgrep --config=p/python --config=/app/semgrep_rules/custom_appsec_rules.yaml --no-git-ignore --exclude src --exclude workspace_storage --exclude cevud-scanner --json --output=/workspace/semgrep_results.json /workspace
+            semgrep --config=p/python --config=/app/semgrep_rules/custom_appsec_rules.yaml --no-git-ignore --exclude src --exclude workspace_storage --exclude cevud-scanner --json --output="/workspace/${RUN_DIR}/semgrep_results.json" /workspace
 
       - name: Execute Stage 2 (Local SLM Mathematical Gating)
-        env:
-          GITHUB_RUN_ID: "run_${{ github.sha }}"
         run: |
-          # 🚫 REMOVE: model_cache volume mount — model is baked in
           docker run --rm \
-            -e GITHUB_RUN_ID="run_${{ github.sha }}" \
+            -e CEVUD_RUN_ID="${CEVUD_RUN_ID}" \
             -v ${{ github.workspace }}:/workspace \
             ${{ steps.image.outputs.image }}:latest \
             python /app/src/triage_orchestrator.py --workspace /workspace --config ${{ inputs.config-path }} --exclude-dirs "${{ inputs.exclude-dirs }},cevud-scanner"
@@ -98,14 +101,13 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           UNIPASSAU_API_KEY: ${{ secrets.UNIPASSAU_API_KEY }}
-          GITHUB_RUN_ID: "run_${{ github.sha }}"
         run: |
           docker run --rm \
             -e OPENAI_API_KEY \
             -e ANTHROPIC_API_KEY \
             -e GOOGLE_API_KEY \
             -e UNIPASSAU_API_KEY \
-            -e GITHUB_RUN_ID="run_${{ github.sha }}" \
+            -e CEVUD_RUN_ID="${CEVUD_RUN_ID}" \
             -v ${{ github.workspace }}:/workspace \
             ${{ steps.image.outputs.image }}:latest \
             python /app/src/agent.py --workspace /workspace --config ${{ inputs.config-path }}
@@ -113,15 +115,17 @@ jobs:
       - name: Move Runtime Outputs to Systematic Artifact Cache Location
         if: always()
         run: |
-          [ -f stage1_2_triage.json ] && mv stage1_2_triage.json workspace_storage/artifacts/run_${{ github.sha }}/ || true
-          [ -f workspace_storage/artifacts/run_${{ github.sha }}/stage1_2_triage.json ] || ([ -f workspace_storage/stage1_2_triage.json ] && mv workspace_storage/stage1_2_triage.json workspace_storage/artifacts/run_${{ github.sha }}/) || true
-          [ -f remediation_dossier.md ] && mv remediation_dossier.md workspace_storage/artifacts/run_${{ github.sha }}/ || true
-          [ -f workspace_storage/artifacts/run_${{ github.sha }}/remediation_dossier.md ] || ([ -f workspace_storage/remediation_dossier.md ] && mv workspace_storage/remediation_dossier.md workspace_storage/artifacts/run_${{ github.sha }}/) || true
+          RUN_DIR="workspace_storage/artifacts/${CEVUD_RUN_ID}"
+          mkdir -p "$RUN_DIR"
+          [ -f stage1_2_triage.json ] && mv stage1_2_triage.json "$RUN_DIR"/ || true
+          [ -f workspace_storage/artifacts/${CEVUD_RUN_ID}/stage1_2_triage.json ] || ([ -f workspace_storage/stage1_2_triage.json ] && mv workspace_storage/stage1_2_triage.json "$RUN_DIR"/) || true
+          [ -f remediation_dossier.md ] && mv remediation_dossier.md "$RUN_DIR"/ || true
+          [ -f workspace_storage/artifacts/${CEVUD_RUN_ID}/remediation_dossier.md ] || ([ -f workspace_storage/remediation_dossier.md ] && mv workspace_storage/remediation_dossier.md "$RUN_DIR"/) || true
 
       - name: Archive Run-Specific Security Artifact Dossier
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: security-triage-dossier-${{ github.sha }}
-          path: workspace_storage/artifacts/run_${{ github.sha }}/
+          name: security-triage-dossier-${{ github.run_id }}
+          path: workspace_storage/artifacts/${{ env.CEVUD_RUN_ID }}/
           retention-days: 14

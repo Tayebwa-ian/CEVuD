@@ -28,6 +28,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Tuple
 
 import matplotlib
+from run_context import resolve_run_id
 matplotlib.use("Agg")  # Non-interactive backend for CI/headless environments
 import matplotlib.pyplot as plt
 
@@ -146,7 +147,7 @@ class PipelineEvaluator:
         """
         Invoke the primary production orchestrator pipeline over the evaluation workspace.
         """
-        run_id = f"run_{os.getenv('GITHUB_RUN_ID') or os.getenv('GITHUB_SHA') or 'local-dev-run'}"
+        run_id = resolve_run_id(bench_dir, self.config["paths"].get("workspace_root", "workspace_storage"))
         target_artifact_dir = os.path.join(self.eval_dir, self.config["paths"]["artifacts_subdir"], run_id)
         os.makedirs(target_artifact_dir, exist_ok=True)
 
@@ -352,7 +353,7 @@ class PipelineEvaluator:
             # 5. Mirror runtime artifacts back into production workspace tree
             # This bridges the gap between evaluation runs and the downstream Phase 3 E2E test.
             try:
-                run_id = triage_data.get("run_id", "run_local-dev-run")
+                run_id = triage_data.get("run_id", "run_unknown")
                 
                 # Resolve the configuration paths directly from config file definitions
                 ws_root = self.config["paths"].get("workspace_root", ".")
@@ -361,7 +362,7 @@ class PipelineEvaluator:
                     config_dir = os.path.dirname(self._config_path)
                     ws_root = os.path.abspath(os.path.join(config_dir, ws_root))
 
-                # Build production destination: workspace_storage_e2e/artifacts/run_local-dev-run/
+                # Build production destination: workspace_storage_e2e/artifacts/<run_id>/
                 prod_artifact_dir = os.path.join(ws_root, self.config["paths"]["artifacts_subdir"], run_id)
                 eval_artifact_dir = os.path.join(self.eval_dir, self.config["paths"]["artifacts_subdir"], run_id)
 

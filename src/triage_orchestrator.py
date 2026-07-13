@@ -3,11 +3,11 @@ import json
 import ast
 import shutil
 import torch
-import os
 import sys
 from typing import List, Dict, Any
 from model_manager import ModelManager
 from vector_store import LocalVectorStore
+from run_context import resolve_run_id
 
 # ---------------------------------------------------------------------------
 # Single source of truth for the gate formula: src/evaluation/gate_strategies.py
@@ -53,13 +53,21 @@ class TriageOrchestrator:
 
         # Establish base root context coordinates
         self.workspace_path = workspace_path or self.config["paths"].get("workspace_root", ".")
-        run_id = os.getenv("GITHUB_RUN_ID") or os.getenv("GITHUB_SHA") or "local-dev-run"
-        
-        if not run_id.startswith("run_"):
-            run_id = f"run_{run_id}"
+        ws_root = self.config["paths"].get("workspace_root", "workspace_storage")
+        # Single source of truth for the run id: Stage 1/2/3 must agree on the
+        # artifact directory or the Stage-2 ledger is never found by Stage 3.
+        run_id = resolve_run_id(self.workspace_path, ws_root)
+        self.run_id = run_id
 
+        # Artifact directory MUST include ``workspace_root`` so Stage 2 and Stage
+        # 3 write to / read from the SAME folder. (Agent.py computes it the same
+        # way; the workflow also creates ``workspace_storage/artifacts/<run_id>``.)
+        if os.path.isabs(ws_root):
+            artifact_base = ws_root
+        else:
+            artifact_base = os.path.join(self.workspace_path, ws_root)
         self.artifact_dir = os.path.join(
-            self.workspace_path,
+            artifact_base,
             self.config["paths"]["artifacts_subdir"],
             run_id
         )
