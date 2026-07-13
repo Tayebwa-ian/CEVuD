@@ -99,51 +99,58 @@ def _describe_el(x) -> str:
     return type(x).__name__
 
 
-def _extract_logits(preds):
-    """Coerce the Trainer's `eval_pred.predictions` into a single 2D float32
-    array of shape (N, num_labels), no matter how it is packaged.
-
-    Depending on the transformers version and model, `predictions` can be:
-      * a single (N, num_labels) ndarray/tensor,
-      * a per-batch *list* of (b, num_labels) arrays (ragged last batch),
-      * a list whose elements are full model outputs / tuples (logits, ...),
-      * or a 3D tensor (b, seq, num_labels) that must be pooled to (b, num_labels).
-    We defensively unwrap and stack each piece so we never hit the ragged
-    ``expected sequence of length ... at dim 1`` error.
-    """
+def _collect_2d(preds, out: list) -> None:
+    """Recursively gather every 2D (b, num_labels) numeric array hidden inside
+    the Trainer's `predictions`, no matter how deeply it is nested (the Trainer
+    sometimes returns ``(batch0_array, (batch1, batch2, ...))`` or per-batch
+    tuples). 3D tensors are pooled to 2D; 1D/0D leaves are dropped (they are
+    scalars, not logits)."""
+    if preds is None:
+        return
     if isinstance(preds, (list, tuple)):
-        pieces = []
         for a in preds:
-            pieces.append(_extract_logits(a))
-        widths = [p.shape[-1] for p in pieces]
-        if len(set(widths)) > 1:
-            # Defensive: arrivals of mixed widths can mean a per-batch list with
-            # an anomalous element, OR hidden states (width = hidden size) leaked
-            # in alongside the 2-class logits (width = 2). Prefer the smallest
-            # width that matches our binary-classifier contract (2); otherwise
-            # fall back to the most common width, then the widest.
-            if 2 in widths:
-                w = 2
-            else:
-                from collections import Counter as _Counter
-                w = _Counter(widths).most_common(1)[0][0]
-            pieces = [
-                (p[:, :w] if p.shape[-1] >= w
-                 else np.pad(p, ((0, 0), (0, w - p.shape[-1])), mode="constant"))
-                for p in pieces
-            ]
-        return np.concatenate(pieces, axis=0)
-
+            _collect_2d(a, out)
+        return
     # Tensor or ndarray.
     if hasattr(preds, "detach"):  # torch.Tensor
         arr = preds.detach().cpu().numpy()
     else:
-        arr = np.asarray(preds, dtype=np.float32)
+        try:
+            arr = np.asarray(preds, dtype=np.float32)
+        except Exception:
+            return
+    if arr.ndim == 0:
+        return
     if arr.ndim == 1:
         arr = arr.reshape(1, -1)
     if arr.ndim == 3:  # (b, seq, c) -> pool over the sequence axis
         arr = arr.mean(axis=1)
-    return arr.astype(np.float32, copy=False)
+    if arr.ndim == 2:
+        out.append(arr.astype(np.float32, copy=False))
+
+
+def _extract_logits(preds):
+    """Coerce the Trainer's `eval_pred.predictions` into a single 2D float32
+    array of shape (N, num_labels). Flattens arbitrarily nested batch outputs
+    and keeps only the columns that match the binary-classifier contract
+    (width 2); stray wider/narrower outputs (e.g. hidden states or loss
+    scalars) are ignored so they can never corrupt or crash the metric."""
+    leaves = []
+    _collect_2d(preds, leaves)
+    if not leaves:
+        raise ValueError("compute_metrics: no 2D logits found in predictions")
+
+    widths = [p.shape[-1] for p in leaves]
+    # Prefer the binary-classifier width (2); otherwise the most common width.
+    if 2 in widths:
+        target = 2
+    else:
+        from collections import Counter as _Counter
+        target = _Counter(widths).most_common(1)[0][0]
+    kept = [p for p in leaves if p.shape[-1] == target]
+    if not kept:  # defensive fallback
+        kept = leaves
+    return np.concatenate(kept, axis=0)
 
 
 def compute_metrics(eval_pred) -> Dict[str, Any]:
@@ -164,6 +171,11 @@ def compute_metrics(eval_pred) -> Dict[str, Any]:
             print(f"[metrics] predictions type={_t} sample={_info}")
         except Exception:
             pass
+
+    logits = _extract_logits(logits)
+    if not getattr(compute_metrics, "_logged_shape2", False):
+        compute_metrics._logged_shape2 = True
+        print(f"[metrics] recovered logits shape={logits.shape} (expect (N, 2))")
 
     logits = _extract_logits(logits)
     probs = torch.softmax(torch.as_tensor(logits), dim=-1).numpy()

@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 import torch
 from typing import List, Dict, Any, Optional
 from deepagents import create_deep_agent
@@ -48,10 +49,14 @@ class DeepAppSecAgent:
         # Connect the unified data graph database engine
         self.vector_store = LocalVectorStore(config_path, self.workspace_path)
 
-        # Resolve unique execution pass identifier tags to prevent multi-tenant overwrite collisions
-        self.run_id = os.getenv("GITHUB_SHA") or os.getenv("GITHUB_RUN_ID") or "local-dev-run"
+        # Keep the run-id resolution IDENTICAL to src/triage_orchestrator.py so
+        # Stage 2 and Stage 3 always agree on the artifact directory. (Stage 2
+        # prefers GITHUB_RUN_ID; this must match or the ledger written by Stage 2
+        # is never found by Stage 3.)
+        self.run_id = os.getenv("GITHUB_RUN_ID") or os.getenv("GITHUB_SHA") or "local-dev-run"
         if not self.run_id.startswith("run_"):
             self.run_id = f"run_{self.run_id}"
+        self.config_path = config_path
 
         # Resolve workspace_root path configurations dynamically
         ws_root_cfg = self.config["paths"]["workspace_root"]
@@ -152,6 +157,36 @@ class DeepAppSecAgent:
         self._context_cache[function_name] = context_str
         return context_str
 
+    def _regenerate_triage_ledger(self) -> Optional[str]:
+        """Attempt to (re)generate the missing Stage 2 triage ledger by invoking
+        the Stage 2 orchestrator in-process. Returns the ledger path on success,
+        or ``None`` if Stage 2 could not run (e.g. Stage 1 Semgrep results are
+        absent). Does not raise — callers decide how to report failure."""
+        triage_path = os.path.join(self.artifact_dir, self.config["paths"]["triage_report"])
+        if os.path.exists(triage_path):
+            return triage_path
+
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            if here not in sys.path:
+                sys.path.insert(0, here)
+            from triage_orchestrator import TriageOrchestrator
+        except Exception as exc:  # pragma: no cover - import guard
+            print(f"[!] Could not import Stage 2 orchestrator: {exc}")
+            return None
+
+        try:
+            print("[*] Stage 2 triage ledger missing — regenerating via Stage 2 gating...")
+            orchestrator = TriageOrchestrator(
+                config_path=self.config_path, workspace_path=self.workspace_path
+            )
+            orchestrator.process_pipeline()
+        except Exception as exc:
+            print(f"[!] Stage 2 regeneration failed: {exc}")
+            return None
+
+        return triage_path if os.path.exists(triage_path) else None
+
     def execute_deep_analysis(self) -> None:
         """
         Orchestrates the Stage 3 workflow.
@@ -161,7 +196,20 @@ class DeepAppSecAgent:
         triage_file = os.path.join(self.artifact_dir, self.config["paths"]["triage_report"])
 
         if not os.path.exists(triage_file):
-            raise FileNotFoundError(f"Upstream Stage 2 triage report ledger missing at target destination: {triage_file}")
+            # Self-heal: Stage 2 (triage_orchestrator) may not have run yet
+            # (e.g. a local `docker run` of Stage 3, or CI ordering). Try to
+            # regenerate the ledger from Stage 1's Semgrep results before giving
+            # up, so the pipeline is robust to a missed Stage 2 invocation.
+            triage_file = self._regenerate_triage_ledger()
+            if triage_file is None:
+                raise FileNotFoundError(
+                    "Upstream Stage 2 triage report ledger is missing and could not "
+                    "be regenerated. Run the pipeline in order:\n"
+                    "  Stage 1: produce Semgrep results (semgrep_results.json)\n"
+                    "  Stage 2: python src/triage_orchestrator.py --workspace <dir> --config <cfg>\n"
+                    "then Stage 3. Expected path: "
+                    f"{os.path.join(self.artifact_dir, self.config['paths']['triage_report'])}"
+                )
 
         with open(triage_file, "r") as f:
             triage_data = json.load(f)
