@@ -29,29 +29,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install transformers and huggingface_hub for model download
 RUN pip install --no-cache-dir transformers huggingface_hub
 
-# Create model directory
-RUN mkdir -p /app/model
-
-# Download BOTH models into the HuggingFace *cache* layout under
-# /app/model_cache. ModelManager resolves weights via `cache_dir`
-# (config -> paths.model_cache_dir), which we repoint at
-# /app/model_cache below — so the baked weights are actually
-# reused at runtime (no per-run HuggingFace download) and the
-# pipeline runs fully offline. snapshot_download's `local_dir`
-# must be the exact `models--<org>--<repo>` path so that
-# `from_pretrained(cache_dir='/app/model_cache')` finds it.
-RUN echo "from huggingface_hub import snapshot_download; \
-snapshot_download( \
-    repo_id='jayansh21/codesheriff-bug-classifier', \
-    local_dir='/app/model_cache/models--jayansh21--codesheriff-bug-classifier', \
-    local_dir_use_symlinks=False, \
-    revision='main' \
-); \
-snapshot_download( \
-    repo_id='microsoft/codebert-base', \
-    local_dir='/app/model_cache/models--microsoft--codebert-base', \
-    local_dir_use_symlinks=False \
-    )" | python3
+# Download BOTH models into the proper HuggingFace *cache* layout under
+# /app/model_cache. We do NOT use snapshot_download's `local_dir` (which
+# produces a flat snapshot dir) because ModelManager loads weights with
+# `from_pretrained(repo_id, cache_dir=...)`, which expects the real cache
+# structure: /app/model_cache/models--<org>--<repo>/snapshots/<rev>/...
+# Baking that structure (via HF_HUB_CACHE) lets the pipeline run fully
+# offline (HF_HUB_OFFLINE=1) with zero per-run HuggingFace downloads.
+ENV HF_HUB_CACHE=/app/model_cache
+RUN python - <<'PY'
+from huggingface_hub import snapshot_download
+snapshot_download('jayansh21/codesheriff-bug-classifier', revision='main')
+snapshot_download('microsoft/codebert-base')
+PY
 # ==========================================
 # STAGE 3: Final Ephemeral Runtime Environment
 # ==========================================

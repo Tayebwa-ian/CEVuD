@@ -92,9 +92,25 @@ class VulnerabilityDataset(Dataset):
 
 def compute_metrics(eval_pred) -> Dict[str, Any]:
     logits, labels = eval_pred.predictions, eval_pred.label_ids
-    if isinstance(logits, list):
-        logits = np.array(logits)
-    probs = torch.softmax(torch.tensor(logits), dim=-1).numpy()
+
+    # `predictions` is normally a single 2D array (N, num_labels). When eval
+    # batches differ in size (e.g. the trailing batch) the Trainer returns a
+    # *list* of per-batch arrays instead; collapsing it along the batch axis
+    # into one 2D tensor avoids both the "tensor from list of ndarrays is
+    # extremely slow" warning and the ragged-shape ValueError
+    # (expected sequence of length N at dim 1 ...).
+    if isinstance(logits, (list, tuple)):
+        # Each element may be a per-batch (b, num_labels) array or, in some
+        # transformers versions, a per-example (num_labels,) array. Normalise to
+        # 2D and stack along the batch axis (requires a constant num_labels).
+        logits = np.concatenate(
+            [np.atleast_2d(np.asarray(a, dtype=np.float32)) for a in logits], axis=0
+        )
+    elif hasattr(logits, "detach"):  # torch.Tensor
+        logits = logits.detach().cpu().numpy()
+    logits = np.asarray(logits, dtype=np.float32)
+
+    probs = torch.softmax(torch.as_tensor(logits), dim=-1).numpy()
     preds = probs.argmax(axis=-1)
 
     precision, recall, f1, _ = precision_recall_fscore_support(
@@ -264,6 +280,22 @@ def _check_training_data_quality(train_ds: "VulnerabilityDataset", allow_noisy: 
 def train(cfg: TrainingConfig) -> Dict[str, Any]:
     set_seed(cfg.seed)
 
+    # ── Use all available CPU cores ───────────────────────────────────────────
+    # PyTorch defaults to a single intra-op thread unless told otherwise; on a
+    # many-core machine this leaves most cores idle. Pin the intra-op thread
+    # pool (and the BLAS/OMP pools) to the full core count so both the forward/
+    # backward passes and DataLoader workers saturate the CPU.
+    cpu_count = max(1, os.cpu_count() or 1)
+    torch.set_num_threads(cpu_count)
+    for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                 "OPENBLAS_NUM_THREADS"):
+        os.environ.setdefault(_var, str(cpu_count))
+    # Avoid the tokenizers fork/thread warning noise under multiple workers.
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    # Heuristic: a few data-prep workers (capped) keep the GPU/CPU fed without
+    # oversubscribing cores; the heavy compute uses the intra-op thread pool.
+    dataloader_workers = min(cpu_count, 8)
+
     device = cfg.device
     use_cpu = device.type == "cpu"
 
@@ -271,6 +303,15 @@ def train(cfg: TrainingConfig) -> Dict[str, Any]:
     model = AutoModelForSequenceClassification.from_pretrained(
         cfg.base_model, num_labels=cfg.num_labels
     )
+    # Fix the head as a *binary* vulnerability classifier and persist an
+    # explicit label map. P(vulnerable) is the softmax probability of class 1,
+    # independent of the underlying CWE/vulnerability type. The label names are
+    # chosen so downstream consumers (ModelManager) unambiguously detect a
+    # single-label softmax model and gate on the vulnerable class.
+    if cfg.num_labels == 2:
+        model.config.id2label = {0: "safe", 1: "vulnerable"}
+        model.config.label2id = {"safe": 0, "vulnerable": 1}
+        model.config.problem_type = "single_label_classification"
     model.to(device)
 
     train_ds = VulnerabilityDataset(cfg.train_path, tokenizer, cfg.max_length)
@@ -316,6 +357,8 @@ def train(cfg: TrainingConfig) -> Dict[str, Any]:
         gradient_accumulation_steps=cfg.gradient_accumulation_steps,
         report_to="none",
         use_cpu=use_cpu,
+        dataloader_num_workers=dataloader_workers,
+        dataloader_prefetch_factor=4 if dataloader_workers > 0 else None,
     )
 
     trainer = WeightedTrainer(
@@ -339,11 +382,34 @@ def train(cfg: TrainingConfig) -> Dict[str, Any]:
 
     train_result = trainer.train()
     metrics = train_result.metrics
-    eval_metrics = trainer.evaluate()
 
-    # ── Persist artifacts ────────────────────────────────────────────────────
-    tokenizer.save_pretrained(str(model_dir))
-    trainer.save_model(str(model_dir))
+    # Final eval for the summary. Guarded: a metrics hiccup must NEVER block
+    # persisting the trained model — that would waste the whole long run.
+    try:
+        eval_metrics = trainer.evaluate()
+    except Exception as exc:
+        print(f"[!] Final evaluation failed ({exc}); continuing to save the model.")
+        eval_metrics = {}
+
+    # ── Persist artifacts (must succeed even after a long, expensive run) ──
+    os.makedirs(str(model_dir), exist_ok=True)
+    try:
+        trainer.save_model(str(model_dir))
+    except Exception as exc:
+        # Fall back to saving the in-memory model directly so we never lose
+        # the trained weights (e.g. output_dir collisions, permission quirks).
+        print(f"[!] trainer.save_model failed ({exc}); saving model directly.")
+        model.save_pretrained(str(model_dir))
+    try:
+        tokenizer.save_pretrained(str(model_dir))
+    except Exception as exc:
+        print(f"[!] tokenizer.save_pretrained failed ({exc}).")
+    # Re-persist the config so the label map / num_labels survive intact
+    # (id2label/label2id/problem_type), even if a partial save occurred.
+    try:
+        model.config.save_pretrained(str(model_dir))
+    except Exception as exc:
+        print(f"[!] config.save_pretrained failed ({exc}).")
 
     # Keep a stable `latest` symlink so `evaluate` / deployment can find the
     # freshest model without knowing the timestamped run directory.

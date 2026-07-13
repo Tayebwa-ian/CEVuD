@@ -301,6 +301,28 @@ class ModelManager:
         if id2label is not None:
             print(f"[*] Model labels: {id2label}")
 
+        # Binary classifier (exactly two classes): unambiguously a single-label
+        # softmax model. P(vulnerable) is the softmax probability of the
+        # vulnerable class, independent of the underlying CWE/vulnerability type
+        # — this is the contract CEVuD's custom-trained model must satisfy.
+        # We detect this by head size (not label wording) so a negative class
+        # named "safe"/"benign"/etc. is NOT mistaken for a multi-label head.
+        num_labels = getattr(model.config, "num_labels", None)
+        if num_labels == 2:
+            vuln_idx = 1
+            if id2label is not None:
+                for idx, label in id2label.items():
+                    if any(k in label.lower() for k in ("vulnerab", "vuln", "exploit")):
+                        vuln_idx = int(idx)
+                        break
+            self._scoring_mode = "softmax"
+            self._vuln_class_idx = vuln_idx
+            print(
+                f"[+] Binary classifier (num_labels=2) detected. "
+                f"Scoring P(vulnerable) = softmax(logits)[:, {vuln_idx}]."
+            )
+            return
+
         # Multi-label mode: a dedicated "safe"/"benign"/"clean" class implies
         # the other classes are independent vulnerability tags.
         safe_labels = ("safe", "benign", "not_vulnerable", "non-vulnerable", "clean")
