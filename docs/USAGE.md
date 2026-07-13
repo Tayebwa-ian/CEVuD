@@ -239,6 +239,85 @@ Set `models.classifier_model` in `config.json` to the trained model directory
 See `TRAINING.md` for the full methodology, reproducibility checklist, and
 troubleshooting.
 
+## Full-dataset workflow (CVEfixes → model, VUDENC → gate weights)
+
+CEVuD uses a deliberate **two-corpus split**: the small classifier is built and
+measured entirely on **CVEfixes**, while the **gate weights** are found and the
+full pipeline is evaluated on **VUDENC**. The two never touch, so the model's
+recall/F1 (CVEfixes test) and the gate's TRR / Cost-reduction / recall (VUDENC
+test) are independent, leakage-free measurements.
+
+> **Important:** to use the *entire* CVEfixes dataset, pass **no caps** —
+> `--few-shot`, `--limit`, `--max-projects`, `--max-samples-per-class`, and
+> `--max-total` must all be omitted. The builder uses the whole manifest
+> whenever those are absent (`src/training/dataset_builder.py`).
+
+### Part A — Train, validate, and evaluate the model on the full CVEfixes
+
+CVEfixes is the model's default source (`config.json` →
+`training.manifest_path = benchmark_manifest_cvefixes.json`). The build step
+writes project-stratified **train / validation / test** splits at a **60 / 20 /
+20** ratio.
+
+```bash
+# 1. Convert the FULL CVEfixes (no --limit). Prefers a local
+#    save_to_disk artifact; otherwise streams from HuggingFace.
+python src/scripts/convert_cvefixes.py --output benchmark_manifest_cvefixes.json
+#    (optional, faster/offline) build the local artifact first:
+#    python -c "from datasets import load_dataset; load_dataset('hitoshura25/cvefixes', split='train').save_to_disk('./cvefixes_dataset')"
+
+# 2. Build the splits — NO caps => the entire dataset is used.
+python -m training.cli build-dataset
+
+# 3. Train. CVEfixes train fits the model; CVEfixes validation drives
+#    early stopping (val-loss plateau), so a high --epochs ceiling is fine.
+python -m training.cli train --epochs 30 --batch-size 16 --lr 3e-5
+
+# 4. Evaluate the model on the CVEfixes test split.
+python -m training.cli evaluate
+```
+
+This is the model's **in-domain** measurement (accuracy / precision / recall /
+F1 / F2 / ROC-AUC / PR-AUC). Building the full dataset clones every project at
+full history to read the real function + context, so it is slow and
+network-heavy; do **not** use `--cache` for reported model numbers.
+
+### Part B — Find the gate weights and evaluate the full pipeline on VUDENC
+
+VUDENC is reserved for the comparative gate study. The runner grid-searches
+`(weight_static, weight_slm, escalation_threshold)` **on VUDENC's validation
+split only** (never the test split) to maximize F2, then reports on the VUDENC
+test split.
+
+```bash
+# 5. Convert VUDENC.
+python src/scripts/convert_vudenc.py --output benchmark_manifest_vudenc.json --split train
+
+# 6. Grid-search the gate weights + evaluate the whole pipeline on VUDENC.
+python src/evaluation/run_comparative_evaluation.py \
+  --manifest benchmark_manifest_vudenc.json --config config.json
+```
+
+The tuned weights are in `comparative_report.json` → `grid_search.best`
+(`weight_static`, `weight_slm`, `escalation_threshold`). Apply them to
+`config.json` so the production pipeline uses the VUDENC-tuned gate:
+
+```json
+"gate_parameters": {
+  "weight_static": "<best.weight_static>",
+  "weight_slm": "<best.weight_slm>",
+  "escalation_threshold": "<best.escalation_threshold>",
+  "slm_override_threshold": 0.90
+}
+```
+
+### End-to-end summary
+
+| Corpus | Role | Command | Produces |
+|---|---|---|---|
+| CVEfixes | Model train / val / test | `build-dataset` (no caps) → `train` → `evaluate` | fine-tuned classifier + model metrics |
+| VUDENC | Gate weight search + pipeline eval | `run_comparative_evaluation.py` | `weight_static` / `weight_slm` / `escalation_threshold` + TRR / Cost-reduction / recall |
+
 Run the unit tests:
 
 ```bash

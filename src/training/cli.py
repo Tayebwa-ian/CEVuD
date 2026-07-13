@@ -66,6 +66,8 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Weight of the contrastive term (default 0.1).")
     bd.add_argument("--contrastive-temperature", type=float, default=0.1,
                     help="Temperature of the contrastive term (default 0.1).")
+    bd.add_argument("--benign-manifest", dest="benign_manifest", default=None,
+                    help="Path to a benign-control manifest (mine_benign_functions.py).")
 
     # ── train ───────────────────────────────────────────────────────────────
     tr = sub.add_parser("train", help="Fine-tune CodeBERT on the training split")
