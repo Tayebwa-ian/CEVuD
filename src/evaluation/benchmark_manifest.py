@@ -132,7 +132,12 @@ def _parse_project(raw: Dict[str, Any]) -> ProjectManifest:
 
     raw_samples = raw.get("samples", [])
     if not raw_samples:
-        raise ManifestValidationError(f"Project '{project}' has no samples.")
+        # An empty project is invalid but harmless — drop it instead of
+        # failing the entire manifest load. Callers that truly need this
+        # project should regenerate the manifest (the converters no longer
+        # emit empty projects). See load_manifest.
+        print(f"[!] Skipping project '{project}': no samples.")
+        return None
     samples = [_parse_sample(s, project) for s in raw_samples]
 
     # sample_id must be unique within a project (uniqueness across the whole
@@ -169,7 +174,10 @@ def load_manifest(path: str) -> List[ProjectManifest]:
     if not isinstance(raw_list, list):
         raise ManifestValidationError("Manifest root must be a JSON list of project objects.")
 
-    projects = [_parse_project(p) for p in raw_list]
+    # _parse_project returns None for empty projects (skipped with a warning),
+    # so filter those out before the cross-project duplicate-id check.
+    parsed = [_parse_project(p) for p in raw_list]
+    projects = [proj for proj in parsed if proj is not None]
 
     all_ids = [s.sample_id for proj in projects for s in proj.samples]
     dupes = {i for i in all_ids if all_ids.count(i) > 1}

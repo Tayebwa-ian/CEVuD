@@ -446,6 +446,9 @@ def convert_cvefixes(
     # (full/partial history so `git show <commit>` is reachable) and then,
     # per sample, checks out the *parent* of the fix commit to read the
     # REAL vulnerable function plus its imports and cross-file context.
+    # Drop projects whose every sample was filtered out (noise / trivial /
+    # no-safe / dedup) so we never emit an empty `samples` list — an empty
+    # project fails `benchmark_manifest.load_manifest` validation.
     manifest = [
         {
             "project": project_name,
@@ -457,6 +460,7 @@ def convert_cvefixes(
             "samples": samples,
         }
         for project_name, samples in samples_by_project.items()
+        if samples
     ]
 
     with open(output_path, "w", encoding="utf-8") as f:
