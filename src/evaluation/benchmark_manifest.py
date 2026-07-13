@@ -101,6 +101,7 @@ def _parse_sample(raw: Dict[str, Any], project: str) -> BenchmarkSample:
         cvss_score=raw.get("cvss_score"),
         fixed_code=raw.get("fixed_code"),
         diff_with_context=raw.get("diff_with_context"),
+        sample_subtype=raw.get("sample_subtype"),
     )
 
 

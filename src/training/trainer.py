@@ -45,7 +45,12 @@ from data_quality import find_contradictions  # noqa: E402
 # ── PyTorch Dataset ─────────────────────────────────────────────────────────
 
 class VulnerabilityDataset(Dataset):
-    """Tokenized JSONL dataset for vulnerability classification."""
+    """Tokenized JSONL dataset for vulnerability classification.
+
+    Also reads the optional ``sample_subtype`` field so the (optional)
+    contrastive training mode can reason about *why* a sample is safe
+    (vulnerable / fixed / benign_control) — see docs/SAFE_COUNTERPARTS.md.
+    """
 
     def __init__(
         self,
@@ -56,6 +61,14 @@ class VulnerabilityDataset(Dataset):
         self.texts, self.labels = load_jsonl(path)
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.subtypes: List[str] = []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    obj = json.loads(line)
+                    self.subtypes.append(obj.get("sample_subtype", "unknown"))
+        except Exception:
+            self.subtypes = ["unknown"] * len(self.texts)
 
     def __len__(self) -> int:
         return len(self.texts)
@@ -110,6 +123,46 @@ def compute_metrics(eval_pred) -> Dict[str, Any]:
 
 # ── Loss / Trainer ────────────────────────────────────────────────────────────
 
+def _supervised_contrastive_loss(
+    embeddings: torch.Tensor, labels: torch.Tensor, temperature: float = 0.1
+) -> torch.Tensor:
+    """Supervised contrastive loss over [CLS] embeddings.
+
+    Positives are same-label samples in the batch; negatives are different-label
+    samples. Returns the mean per-anchor ``-log(sum(pos)/sum(all≠self))``,
+    skipping anchors that have no same-label partner (avoids ``log(0)``).
+
+    This is the *optional* second term of the safe-counterpart training
+    objective (docs/SAFE_COUNTERPARTS.md, Step 2): it teaches the encoder
+    that a ``vulnerable`` function should sit near its ``fixed`` twin and far
+    from a ``benign_control`` function — using the post-fix pair as a
+    *contrastive* signal rather than as a hard ``label=0`` target, which is
+    more robust to the noise the post-fix function can carry. Disabled by
+    default (``contrastive=False``); the standard CE objective is unchanged.
+    """
+    device = embeddings.device
+    emb = torch.nn.functional.normalize(embeddings, dim=-1)
+    n = emb.size(0)
+    if n < 2:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    sim = torch.matmul(emb, emb.T) / max(temperature, 1e-4)
+    labels = labels.view(-1)
+    eye = torch.eye(n, dtype=torch.bool, device=device)
+    pos_mask = (labels.unsqueeze(0) == labels.unsqueeze(1)) & ~eye
+    all_mask = ~eye
+
+    exp_sim = torch.exp(sim)
+    pos = (exp_sim * pos_mask).sum(dim=1)
+    denom = (exp_sim * all_mask).sum(dim=1).clamp(min=1e-8)
+
+    has_pos = pos_mask.sum(dim=1) > 0
+    per_anchor = -torch.log((pos / denom).clamp(min=1e-8) + 1e-8)
+    if has_pos.sum() == 0:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+    return per_anchor[has_pos].mean()
+
+
 class WeightedTrainer(Trainer):
     """`Trainer` variant that applies per-class weights to the cross-entropy
     loss and optionally trains only the classifier head (frozen backbone).
@@ -117,12 +170,24 @@ class WeightedTrainer(Trainer):
     Vulnerability datasets are typically class-imbalanced; weighting the loss
     prevents the model from collapsing toward the majority class and gives the
     minority (vulnerable) class a stronger gradient signal.
+
+    When ``contrastive=True`` an optional supervised-contrastive term is added
+    on top of the cross-entropy loss (weighted by ``contrastive_lambda``), so
+    the post-fix / benign-control pairing is exploited as a *contrastive*
+    signal. The standard CE objective is used unchanged when the flag is off.
     """
 
-    def __init__(self, *args, class_weights=None, freeze_backbone=False, **kwargs):
+    def __init__(
+        self, *args, class_weights=None, freeze_backbone=False,
+        contrastive: bool = False, contrastive_lambda: float = 0.1,
+        contrastive_temperature: float = 0.1, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self.class_weights = class_weights
         self.freeze_backbone = freeze_backbone
+        self.contrastive = contrastive
+        self.contrastive_lambda = contrastive_lambda
+        self.contrastive_temperature = contrastive_temperature
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels = inputs.pop("labels")
@@ -134,6 +199,19 @@ class WeightedTrainer(Trainer):
         else:
             loss_fct = torch.nn.CrossEntropyLoss()
         loss = loss_fct(logits.view(-1, self.model.config.num_labels), labels.view(-1))
+
+        if self.contrastive:
+            # Second forward pass to obtain [CLS] embeddings for the
+            # supervised-contrastive term. This adds one extra encoder pass
+            # per batch (only when the contrastive objective is enabled).
+            with torch.no_grad():
+                hidden = model(**inputs, output_hidden_states=True).hidden_states
+            cls_emb = hidden[-1][:, 0]  # (batch, hidden)
+            supcon = _supervised_contrastive_loss(
+                cls_emb, labels, self.contrastive_temperature
+            )
+            loss = loss + self.contrastive_lambda * supcon
+
         return (loss, outputs) if return_outputs else loss
 
 
@@ -242,6 +320,9 @@ def train(cfg: TrainingConfig) -> Dict[str, Any]:
         compute_metrics=compute_metrics,
         class_weights=class_weights,
         freeze_backbone=cfg.freeze_backbone,
+        contrastive=cfg.contrastive,
+        contrastive_lambda=cfg.contrastive_lambda,
+        contrastive_temperature=cfg.contrastive_temperature,
         callbacks=[
             EarlyStoppingCallback(
                 early_stopping_patience=cfg.early_stopping_patience,

@@ -62,9 +62,18 @@ manifests share the same schema, so the harnesses are interchangeable.
   inline; the evaluation harness materialises each snippet to its own file for
   scanning.
 - **Class balance**: because VUDENC is mined from vulnerable commits, the
-  function-level set can skew toward the positive (vulnerable) class. Check the
-  converter's printed balance and, if needed, restrict/pre-sample for a
+  function-level set can skew toward the positive (vulnerable) class. Check
+  the converter's printed balance and, if needed, restrict/pre-sample for a
   balanced evaluation.
+- **Genuine safe class (recommended for the gate study)**: VUDENC has no
+  `fixed_code`, so its `label=0` samples are functions the corpus's *own*
+  annotators left unlabeled — not verified-benign code, and the corpus is
+  near-positive-only (precision is undefined). To give the gate study a real
+  safe class, merge verified-benign controls produced by
+  `src/scripts/mine_benign_functions.py` via
+  `convert_vudenc.py --benign-manifest benign_controls_manifest.json`
+  (they are added as `local_source` projects tagged
+  `sample_subtype="benign_control"`). See `docs/SAFE_COUNTERPARTS.md`.
 - **License**: follows the upstream VUDENC data license; verify before
   redistribution.
 
@@ -93,9 +102,12 @@ downstream:
   "target_commit":      null,                             // VUDENC: null
   "cve_id":             null,                             // VUDENC: null
   "cvss_score":         0.0,                              // VUDENC: 0.0
-  "diff_with_context":  ""                                // VUDENC: ""
+  "diff_with_context":  ""                // VUDENC: ""
+  "sample_subtype":     "vulnerable"     // "vulnerable" | "fixed" | "benign_control" | "benign" | null
 }
 ```
+
+> **`sample_subtype` (added for the safe-counterpart methodology).** Disambiguates *why* a sample carries its label so the "safe" class is auditable end-to-end. `"vulnerable"` = pre-fix half of a CVEfixes pair; `"fixed"` = post-fix half (the "safe counterpart" we audit for bundled edits); `"benign_control"` = a function mined from unmodified code (verified-benign, `label=0`); `"benign"` = a function labeled safe by a corpus's own annotation (VUDENC all-zero lines). See `docs/SAFE_COUNTERPARTS.md` — the authoritative reference for how the safe counterpart is constructed and measured.
 
 ### Data-quality / noise filtering (important)
 

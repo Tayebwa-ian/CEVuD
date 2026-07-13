@@ -59,6 +59,21 @@ code signal (e.g. a lone `__version__ = '3.7'`), are dropped at conversion
 time. This is what makes the task learnable — an earlier unfiltered run
 plateaued at `loss ≈ 0.693` / `roc_auc ≈ 0.5`. See `docs/DATA_QUALITY.md`.
 
+> **Safe counterpart — important caveat.** The post-fix function is only a
+> *relative* negative (it lacks *that one* CVE, but may still contain a
+> *different* weakness) and a fix commit can bundle unrelated edits, so the
+> `label=0` sample sometimes differs from its twin for non-security reasons.
+> The recommended hardening is to **also inject verified-benign controls**
+> (`src/scripts/mine_benign_functions.py` → `build-dataset
+> --benign-manifest`): functions mined from files the fix commit did **not**
+> modify, i.e. demonstrably not part of any vulnerability fix. These are
+> merged into the training pool as `label=0`, `sample_subtype="benign_control"`.
+> An optional **contrastive** training mode (`--contrastive`, OFF by default)
+> additionally uses the (vulnerable, fixed) pair as a contrastive signal
+> rather than a hard `label=0` target. Full methodology + measurements:
+> `docs/SAFE_COUNTERPARTS.md`. State in the paper which regime the reported
+> model used (standard CE vs CE + benign controls vs + contrastive).
+
 Within CVEfixes the same split provides the classifier's own validation
 (early stopping / best-checkpoint selection) and test evaluation
 (accuracy / F1 / ROC-AUC). VUDENC is reserved for the **gate study** — the

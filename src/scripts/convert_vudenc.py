@@ -110,6 +110,14 @@ from data_quality import (  # noqa: E402
     normalize_code,
 )
 
+# benchmark_manifest (src/evaluation) loads the benign-control manifest
+# produced by mine_benign_functions.py, so VUDENC's gate-study corpus can
+# be given genuine safe samples (see docs/SAFE_COUNTERPARTS.md, Step 3).
+_EVAL_DIR = os.path.join(_SRC_DIR, "evaluation")
+if _EVAL_DIR not in sys.path:
+    sys.path.insert(0, _EVAL_DIR)
+from benchmark_manifest import load_manifest  # noqa: E402
+
 # HuggingFace dataset ID for the VUDENC dataset
 HF_DATASET_ID = "DetectVul/Vudenc"
 
@@ -218,6 +226,15 @@ def _row_to_sample(row: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
 
     sample_id = f"vudenc::{vuln_type}::{index:06d}::{uuid.uuid4().hex[:6]}"
 
+    # ``sample_subtype`` disambiguates *why* a sample carries its label
+    # (see docs/SAFE_COUNTERPARTS.md). VUDENC has no fix-commit
+    # provenance, so its label=0 samples are functions whose own
+    # per-line annotations were all non-vulnerable — i.e. benign *by the
+    # corpus's own annotation* ("benign"), NOT verified-benign controls
+    # mined from unmodified code (those come from
+    # ``--benign-manifest`` and are tagged "benign_control").
+    sample_subtype = "vulnerable" if function_label == 1 else "benign"
+
     # VUDENC carries no repository / commit metadata, so the provenance
     # fields are emitted empty for schema consistency with the CVEfixes
     # manifest (convert_cvefixes.py) — they are simply never populated.
@@ -229,6 +246,7 @@ def _row_to_sample(row: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
         "end_line": max(len(raw_lines), 1),
         "label": function_label,
         "vulnerability_type": vuln_type,
+        "sample_subtype": sample_subtype,
         "source_code": source_code,
         "fixed_code": None,
         "repo_url": None,
@@ -255,6 +273,49 @@ def _infer_function_name(code: str) -> str:
 # Main converter
 # ---------------------------------------------------------------------------
 
+def _load_benign_as_local_projects(benign_manifest_path: str) -> List[Dict[str, Any]]:
+    """Loads a benign-control manifest (from ``mine_benign_functions.py``) and
+    re-shapes it into VUDENC-style ``local_source`` projects so the gate study
+    can be given genuine safe samples *without* cloning the CVEfixes repos.
+
+    Each benign control already embeds its ``source_code``; we convert its
+    ``git_source`` provenance into a ``local_source`` with ``root_path`` "."
+    (a sentinel — the evaluation harness scores the embedded ``source_code``
+    directly, the same inline path VUDENC itself uses). ``repo_url`` and
+    ``commit_id`` are preserved on the samples for traceability.
+    """
+    projects = load_manifest(benign_manifest_path)
+    out: List[Dict[str, Any]] = []
+    for proj in projects:
+        samples = []
+        for s in proj.samples:
+            samples.append({
+                "sample_id": s.sample_id,
+                "file_path": s.file_path,
+                "function_name": s.function_name,
+                "start_line": s.start_line,
+                "end_line": s.end_line,
+                "label": s.label,
+                "vulnerability_type": s.vulnerability_type or "benign",
+                "sample_subtype": s.sample_subtype or "benign_control",
+                "source_code": s.source_code,
+                "fixed_code": None,
+                "repo_url": s.repo_url,
+                "commit_id": s.commit_id,
+                "target_commit": s.target_commit,
+                "cve_id": None,
+                "cvss_score": 0.0,
+                "diff_with_context": "",
+            })
+        if samples:
+            out.append({
+                "project": f"vudenc_benign::{proj.project}",
+                "local_source": {"root_path": "."},
+                "samples": samples,
+            })
+    return out
+
+
 def convert_vudenc(
     output_path: str,
     local_dir: Optional[str] = None,
@@ -262,6 +323,7 @@ def convert_vudenc(
     split: str = "train",
     dedup: bool = True,
     min_code_lines: int = 2,
+    benign_manifest_path: Optional[str] = None,
 ) -> None:
     """Converts VUDENC into a CEVuD benchmark manifest.
 
@@ -270,7 +332,7 @@ def convert_vudenc(
     train/val/test without leakage.
 
     Args:
-        output_path: Path to write the benchmark_manifest JSON.
+        output_path: Path to write the benchmark manifest JSON.
         local_dir: If set, read from a local VUDENC clone instead of HF.
         limit: Maximum number of samples to include. None = all.
         split: HuggingFace split to use ('train' or 'test').
@@ -279,6 +341,12 @@ def convert_vudenc(
             label — those are hard contradictions the classifier cannot learn.
         min_code_lines: Drop a snippet with fewer than this many lines of real
             code signal (comments/docstrings/version assignments do not count).
+        benign_manifest_path: Optional path to a benign-control manifest
+            (``mine_benign_functions.py``). When given, its samples are
+            merged in as ``local_source`` projects (tagged
+            ``sample_subtype="benign_control"``) so the gate study has real
+            safe samples to compute precision/recall on (see
+            docs/SAFE_COUNTERPARTS.md, Step 3).
     """
     row_stream = (
         _stream_local(local_dir) if local_dir else _stream_hf(split=split)
@@ -346,21 +414,34 @@ def convert_vudenc(
         for project_name, samples in sorted(samples_by_project.items())
     ]
 
+    # ── Optional: merge verified-benign controls for the gate study ──────────
+    # Without these, the VUDENC corpus is (near-)positive-only, so the gate
+    # study can only measure recall — precision is undefined. Merging
+    # benign_control samples gives it a genuine safe class.
+    n_benign = 0
+    if benign_manifest_path:
+        benign_projects = _load_benign_as_local_projects(benign_manifest_path)
+        for bp in benign_projects:
+            manifest.append(bp)
+            n_benign += len(bp["samples"])
+
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
     # ── Summary ──────────────────────────────────────────────────────────────
-    vulnerable   = sum(s["label"] for p in manifest for s in p["samples"])
+    vulnerable   = sum(s["label"] for p in manifest for s in p["samples"] if s.get("sample_subtype") != "benign_control")
     safe         = total_added - vulnerable
     print(f"\n{'─'*60}")
     print(f"  Source        : {'HuggingFace ' + HF_DATASET_ID if not local_dir else local_dir}")
     print(f"  Samples added : {total_added:,}  ({vulnerable:,} vulnerable, {safe:,} safe)")
+    if benign_manifest_path:
+        print(f"  + Benign ctrl : {n_benign:,}  (sample_subtype=benign_control, merged for gate study)")
     print(f"  Skipped empty : {total_skipped:,}  (empty / malformed rows)")
     print(f"  Skipped dup   : {skipped_dup:,}  (duplicate snippets)")
     print(f"  Skipped contra: {skipped_contradiction:,}  (identical text, both labels)")
     print(f"  Skipped short : {skipped_short:,}  (< {min_code_lines} code-signal lines)")
-    print(f"  Projects      : {len(manifest):,}  (one per vulnerability type)")
+    print(f"  Projects      : {len(manifest):,}  (one per vulnerability type + benign)")
     print(f"  Role          : gate-study corpus for src/evaluation/")
     print(f"                 (classifier is trained/validated/evaluated on CVEfixes;")
     print(f"                  VUDENC is the held-out corpus for the gate study)")
@@ -429,8 +510,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "signal. Default: 2."
         ),
     )
+    p.add_argument(
+        "--benign-manifest",
+        dest="benign_manifest_path",
+        default=None,
+        help=(
+            "Path to a benign-control manifest from mine_benign_functions.py. "
+            "When given, its samples are merged in as local_source projects "
+            "(sample_subtype='benign_control') so the gate study has real "
+            "safe samples to compute precision/recall. See docs/SAFE_COUNTERPARTS.md."
+        ),
+    )
     return p
-
 
 if __name__ == "__main__":
     args = _build_parser().parse_args()
@@ -441,4 +532,17 @@ if __name__ == "__main__":
         split=args.split,
         dedup=args.dedup,
         min_code_lines=args.min_code_lines,
+        benign_manifest_path=args.benign_manifest_path,
+    )
+
+if __name__ == "__main__":
+    args = _build_parser().parse_args()
+    convert_vudenc(
+        output_path=args.output,
+        local_dir=args.local_dir,
+        limit=args.limit,
+        split=args.split,
+        dedup=args.dedup,
+        min_code_lines=args.min_code_lines,
+        benign_manifest_path=args.benign_manifest_path,
     )

@@ -237,42 +237,66 @@ def test_evaluate_gate_combined_override():
     assert result["metrics"]["override_triggered"] is True
 
 def test_process_pipeline_basic_functionality(temp_workspace):
-    """Test the full pipeline execution with minimal mocking."""
+    """Test the full pipeline execution with minimal mocking.
+
+    The Stage-2 gate now scores each function by chunking it and calling
+    ``ModelManager.get_classifier_chunk_scores`` (which returns a per-function
+    aggregated score plus the per-chunk detail). We mock that method.
+    """
     orchestrator = TriageOrchestrator(
         config_path=temp_workspace["config_path"],
         workspace_path=temp_workspace["workspace"]
     )
-    
-    # Mock the model manager's inference to return predictable values
-    with patch.object(orchestrator.model_manager, 'get_classifier_inference') as mock_inference:
-        # Simulate SLM scores: high for vulnerable function, low for safe one
-        mock_inference.return_value = [0.95, 0.1]
-        
+
+    chunk_scores = [
+        {
+            "score": 0.95,
+            "chunks": [
+                {"start_line": 2, "end_line": 5, "prob": 0.95, "text": "def vulnerable_function():"}
+            ],
+        },
+        {
+            "score": 0.1,
+            "chunks": [
+                {"start_line": 7, "end_line": 9, "prob": 0.1, "text": "def safe_function():"}
+            ],
+        },
+    ]
+
+    # Mock the model manager's chunked inference to return predictable values
+    with patch.object(orchestrator.model_manager, 'get_classifier_chunk_scores') as mock_inference:
+        mock_inference.return_value = chunk_scores
+
         # Run the pipeline
         orchestrator.process_pipeline()
-        
+
         # Verify output file was created
         triage_output = os.path.join(temp_workspace["artifacts_dir"], "stage1_2_triage.json")
         assert os.path.exists(triage_output)
-        
+
         # Load and validate the output
         with open(triage_output, "r") as f:
             output = json.load(f)
-        
+
         # Validate structure
         assert "run_id" in output
         assert "gate_decision" in output
         assert "findings" in output
         assert "status" in output
-        
+
         # Validate escalation triggered (due to ERROR + SLM 0.95 override)
         assert output["gate_decision"]["escalate_to_llm"] is True
         assert output["status"] == "VULNERABLE"
-        
+
         # Validate findings
         assert len(output["findings"]) == 2
         assert output["findings"][0]["escalate"] is True  # Vulnerable function
         assert output["findings"][1]["escalate"] is False  # Safe function
+
+        # Escalated findings carry the suspicious chunks + cross-file context
+        # handed to the Stage-3 LLM (cross-context argumentation).
+        assert output["findings"][0]["suspicious_chunks"]
+        assert "slm_chunk_scores" in output["findings"][0]["metrics"]
 
 def test_process_pipeline_no_findings(temp_workspace):
     """Test pipeline with empty semgrep results."""
@@ -286,8 +310,8 @@ def test_process_pipeline_no_findings(temp_workspace):
         workspace_path=temp_workspace["workspace"]
     )
     
-    # Mock model inference (should not be called)
-    with patch.object(orchestrator.model_manager, 'get_classifier_inference') as mock_inference:
+    # Mock model chunked inference (should not be called)
+    with patch.object(orchestrator.model_manager, 'get_classifier_chunk_scores') as mock_inference:
         mock_inference.return_value = []
         
         # Run the pipeline

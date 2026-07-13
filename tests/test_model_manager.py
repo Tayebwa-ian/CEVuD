@@ -166,3 +166,40 @@ def test_model_manager_multilabel_scoring(mock_config):
     # vulnerable row escalates, safe row stays near zero
     assert probs[0] == pytest.approx(0.95, abs=1e-2)
     assert probs[1] == pytest.approx(0.007, abs=1e-2)
+
+
+def test_model_manager_chunk_scores_aggregates(mock_config):
+    """``get_classifier_chunk_scores`` cuts a long snippet into uniform chunks,
+    scores each chunk, and aggregates (max by default). Mirrors how the Stage-2
+    gate feeds the small model at inference time.
+
+    The real model load is bypassed by mocking ``get_classifier_inference``;
+    we just need the chunking + aggregation orchestration to be correct.
+    """
+    manager = ModelManager()
+
+    # ~180 lines of real code -> several 64-line windows with 8-line overlap.
+    long_code = "".join(f"def f_{i}():\n    return {i}\n" for i in range(60))
+
+    def fake_inference(texts):
+        # Rising per-chunk probabilities so the max is exactly 1.0.
+        n = len(texts)
+        return [round((i + 1) / n, 4) for i in range(n)]
+
+    with patch.object(manager, "get_classifier_inference", side_effect=fake_inference):
+        results = manager.get_classifier_chunk_scores(
+            [long_code], chunk_max_lines=64, chunk_overlap=8, min_code_lines=2
+        )
+
+    assert len(results) == 1
+    r = results[0]
+    assert r["score"] == pytest.approx(1.0, abs=1e-3)
+    assert len(r["chunks"]) >= 2
+    for c in r["chunks"]:
+        assert set(c.keys()) >= {"start_line", "end_line", "prob", "text"}
+
+
+def test_model_manager_chunk_scores_empty(mock_config):
+    """An empty snippet list returns an empty result without touching the model."""
+    manager = ModelManager()
+    assert manager.get_classifier_chunk_scores([]) == []

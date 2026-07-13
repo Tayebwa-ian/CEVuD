@@ -160,6 +160,16 @@ python -m src.training.cli build-dataset \
 
 # Include cross-file context (slower but more signal):
 python -m src.training.cli build-dataset --cross-file --max-workers 8
+
+# RECOMMENDED: also inject verified-benign controls so the model learns
+# what *clean* code looks like (not just pre-fix vs post-fix). Mine them
+# once from the same repos, then merge into the build. See docs/SAFE_COUNTERPARTS.md.
+python src/scripts/mine_benign_functions.py \
+    --manifest benchmark_manifest_cvefixes.json \
+    --output benign_controls_manifest.json
+python -m src.training.cli build-dataset \
+    --manifest benchmark_manifest_cvefixes.json \
+    --benign-manifest benign_controls_manifest.json
 ```
 
 ### What the builder does
@@ -244,6 +254,16 @@ deploying, **build on a large dataset (Step 1, no `--few-shot`)** and:
   sample-efficient and stable than full fine-tuning on small data, and trains
   much faster (good for the constrained host). With a large dataset, full
   fine-tuning (`--freeze-backbone` off) is stronger.
+
+> **Optional contrastive mode (`--contrastive`, OFF by default).** When the
+> post-fix "safe" function is noisy (a fix commit that bundled unrelated
+> edits), forcing it as a hard `label=0` target can teach the model the
+> *refactor* instead of the *vulnerability*. The contrastive mode instead
+> adds a supervised-contrastive term so a vulnerable function is pulled toward
+> its fixed twin and pushed from a verified-benign control. The **reported/
+> recommended** setup keeps this OFF (standard class-weighted cross-entropy);
+> it is provided for ablation experiments. Full design + rationale:
+> `docs/SAFE_COUNTERPARTS.md` (Step 2).
 
 ```bash
 # Real training on a large dataset (full fine-tune, early-stopped on val loss):

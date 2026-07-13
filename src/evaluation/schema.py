@@ -98,6 +98,22 @@ class BenchmarkSample:
         fixed_code: Optional patched version of `source_code` (for patch
             analysis / CodeSheriff-style fix comparison).
         diff_with_context: Optional unified diff with surrounding context.
+        sample_subtype: Optional semantic sub-label that disambiguates *why*
+            a sample carries its `label`. One of:
+              - "vulnerable"  : the pre-fix (label=1) half of a CVEfixes pair.
+              - "fixed"       : the post-fix (label=0) half of a CVEfixes pair
+                              (the "safe counterpart" we are auditing).
+              - "benign_control" : a function that was NOT touched by any
+                              vulnerability-fixing commit — a *verified* safe
+                              sample mined from the same repositories
+                              (see src/scripts/mine_benign_functions.py and
+                              docs/SAFE_COUNTERPARTS.md).
+              - "benign"      : a function labeled safe by a corpus's own
+                              annotation (e.g. VUDENC's all-zero-line
+                              functions) rather than by our fix-commit logic.
+            Defaults to None for backwards-compatible manifests. Carried through
+            to the enriched training JSONL so the safe-counterpart methodology
+            is auditable end-to-end.
     """
     sample_id: str
     file_path: str
@@ -114,6 +130,7 @@ class BenchmarkSample:
     cvss_score: Optional[float] = None
     fixed_code: Optional[str] = None
     diff_with_context: Optional[str] = None
+    sample_subtype: Optional[str] = None
 
 
 @dataclass

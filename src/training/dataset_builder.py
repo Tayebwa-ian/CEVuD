@@ -76,6 +76,10 @@ class EnrichedSample:
     end_line: int
     source_code_length: int
     context_length: int
+    # Disambiguates *why* a sample carries its label (safe-counterpart
+    # audit; see docs/SAFE_COUNTERPARTS.md). One of "vulnerable",
+    # "fixed", "benign_control", "benign", or "unknown" (backwards-compat).
+    sample_subtype: str = "unknown"
     # Chunking metadata (set when the sample is a uniform code window cut from
     # a larger function during build_dataset; -1 / 0 mean "whole function").
     chunk_index: int = -1
@@ -187,6 +191,7 @@ def _enrich_sample(
         end_line=func_end,
         source_code_length=len(content.splitlines()),
         context_length=len(text.splitlines()),
+        sample_subtype=sample.sample_subtype or "unknown",
     )
 
 
@@ -410,6 +415,16 @@ def build_dataset(
     chunk_max_lines: int = 64,
     chunk_overlap: int = 8,
     chunk_min_code_lines: int = 2,
+    # ── Verified-benign controls (safe-counterpart remedy) ───────────────────
+    # When ``benign_manifest_path`` points at a manifest produced by
+    # ``src/scripts/mine_benign_functions.py``, its projects are merged into the
+    # training pool *before* project selection / splitting. Every benign control is
+    # a ``label=0`` function that was NOT touched by any vulnerability-fixing
+    # commit, so it is a genuine safe sample (``sample_subtype="benign_control"``)
+    # rather than "the function after a fix". Benign projects keep their own
+    # project identity, so the project-level split still prevents leakage, and they
+    # are counted as label=0 in the usual few-shot caps. See docs/SAFE_COUNTERPARTS.md.
+    benign_manifest_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Builds an enriched, split training dataset from the benchmark manifest.
 
@@ -419,6 +434,14 @@ def build_dataset(
     os.makedirs(str(cache_root), exist_ok=True)
 
     projects = load_manifest(manifest_path)
+    if benign_manifest_path:
+        try:
+            benign_projects = load_manifest(benign_manifest_path)
+            projects.extend(benign_projects)
+            print(f"[*] Merged {len(benign_projects)} benign-control project(s) "
+                  f"from {benign_manifest_path}")
+        except Exception as exc:
+            print(f"[!] Could not load benign manifest '{benign_manifest_path}': {exc}")
     projects = select_projects(projects, max_projects)
     print(f"[*] Building dataset from {len(projects)} projects ...")
 
@@ -477,6 +500,7 @@ def build_dataset(
                         end_line=s.end_line,
                         source_code_length=len(c.text.splitlines()),
                         context_length=len(c.text.splitlines()),
+                        sample_subtype=s.sample_subtype,
                         chunk_index=i,
                         chunk_start=c.start_line,
                         chunk_end=c.end_line,
@@ -526,11 +550,13 @@ def build_dataset(
     from collections import Counter
     cwe_counts = Counter(s.cwe for s in enriched)
     label_counts = Counter(s.label for s in enriched)
+    subtype_counts = Counter(s.sample_subtype for s in enriched)
 
     summary = {
         "total_samples": len(enriched),
         "projects_processed": len(projects),
         "label_distribution": {"vulnerable": label_counts.get(1, 0), "safe": label_counts.get(0, 0)},
+        "sample_subtypes": dict(subtype_counts),
         "unique_cwe_types": len(cwe_counts),
         "cwe_coverage": dict(cwe_counts.most_common()),
         "split_sizes": {k: len(v) for k, v in splits.items()},

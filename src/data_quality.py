@@ -23,11 +23,18 @@ The functions here let every stage of the pipeline reject those noisy samples:
                                      a comment, docstring, or version assignment)?
 * ``code_signal_line_count(text)`` — how many such lines a snippet has.
 * ``texts_are_equivalent(a, b)``   — identical once blank/whitespace is ignored.
-* ``is_trivial_change(vuln, safe)``— True when the *only* difference between the
-                                     vulnerable and fixed snippet is non-semantic
-                                     (comments / docstrings / version bumps).
-* ``find_contradictions(records)`` — yield normalized texts that appear with
-                                     BOTH labels (hard contradictions).
+ * ``is_trivial_change(vuln, safe)``— True when the *only* difference between the
+                                      vulnerable and fixed snippet is non-semantic
+                                      (comments / docstrings / version bumps).
+ * ``changed_line_ratio(a, b)`` — fraction of lines that differ between two
+                                      snippets (0.0–1.0). Used by the
+                                      safe-counterpart diagnostic.
+ * ``is_substantial_change(a, b, t)`` — True when the post-fix function differs
+                                      from its vulnerable twin across more than
+                                      ``t`` of their lines (a bundled refactor /
+                                      rework, not just the security patch).
+ * ``find_contradictions(records)`` — yield normalized texts that appear with
+                                      BOTH labels (hard contradictions).
 
 These are deliberately heuristic and conservative: they never drop a sample
 that carries a real, learnable code change. See ``docs/DATA_QUALITY.md`` for the
@@ -142,6 +149,44 @@ def texts_are_equivalent(a: str, b: str) -> bool:
     if not a or not b:
         return False
     return normalize_code(a) == normalize_code(b)
+
+
+def changed_line_ratio(a: str, b: str) -> float:
+    """Fraction of lines that differ between ``a`` and ``b`` (0.0–1.0).
+
+    Computed with difflib.SequenceMatcher over rstripped lines. Used by the
+    safe-counterpart diagnostic (``src/scripts/diagnose_safe_counterparts.py``)
+    to flag post-fix functions that were *heavily* reworked beyond the actual
+    security patch — a sign the ``label=0`` sample may carry spurious,
+    non-security differences from its vulnerable twin (which would teach the
+    classifier the *refactor* rather than the *vulnerability*).
+    """
+    if not a or not b:
+        return 1.0
+    a_lines = [ln.rstrip() for ln in a.splitlines()]
+    b_lines = [ln.rstrip() for ln in b.splitlines()]
+    if not a_lines and not b_lines:
+        return 0.0
+    sm = difflib.SequenceMatcher(None, a_lines, b_lines)
+    changed = 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        changed += (i2 - i1) + (j2 - j1)
+    total = len(a_lines) + len(b_lines)
+    return (changed / total) if total else 0.0
+
+
+def is_substantial_change(a: str, b: str, threshold: float = 0.5) -> bool:
+    """True when ``a`` and ``b`` differ across more than ``threshold`` of their
+    (combined) lines — i.e. the fix commit did more than patch the
+    vulnerability (it refactored, reformatted, or reworked the function).
+
+    Such pairs are a contamination risk for the (vulnerable, safe) training
+    signal: the classifier may learn the *refactor* rather than the
+    *vulnerability*. See ``docs/SAFE_COUNTERPARTS.md``.
+    """
+    return changed_line_ratio(a, b) > threshold
 
 
 def is_trivial_change(vuln: str, safe: str) -> bool:

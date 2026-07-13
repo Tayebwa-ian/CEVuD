@@ -59,6 +59,13 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Overlapping lines between consecutive chunks (default 8).")
     bd.add_argument("--chunk-min-code-lines", type=int, default=2,
                     help="Drop chunks with fewer code-signal lines (default 2).")
+    bd.add_argument("--contrastive", action="store_true",
+                    help="Add a supervised-contrastive term (vulnerable vs fixed vs "
+                         "benign_control). Experimental; see docs/SAFE_COUNTERPARTS.md.")
+    bd.add_argument("--contrastive-lambda", type=float, default=0.1,
+                    help="Weight of the contrastive term (default 0.1).")
+    bd.add_argument("--contrastive-temperature", type=float, default=0.1,
+                    help="Temperature of the contrastive term (default 0.1).")
 
     # ── train ───────────────────────────────────────────────────────────────
     tr = sub.add_parser("train", help="Fine-tune CodeBERT on the training split")
@@ -108,6 +115,14 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Overlapping lines between consecutive chunks (default 8).")
     ra.add_argument("--chunk-min-code-lines", type=int, default=2,
                     help="Drop chunks with fewer code-signal lines (default 2).")
+    ra.add_argument("--benign-manifest", dest="benign_manifest", default=None,
+                    help="Path to a benign-control manifest (mine_benign_functions.py).")
+    ra.add_argument("--contrastive", action="store_true",
+                    help="Add a supervised-contrastive term (experimental).")
+    ra.add_argument("--contrastive-lambda", type=float, default=0.1,
+                    help="Weight of the contrastive term (default 0.1).")
+    ra.add_argument("--contrastive-temperature", type=float, default=0.1,
+                    help="Temperature of the contrastive term (default 0.1).")
     ra.add_argument("--allow-noisy-data", action="store_true",
                     help="Train even if the dataset contains contradictory samples.")
 
@@ -140,6 +155,7 @@ def cmd_build_dataset(args, cfg: TrainingConfig) -> None:
         chunk_max_lines=args.chunk_max_lines,
         chunk_overlap=args.chunk_overlap,
         chunk_min_code_lines=args.chunk_min_code_lines,
+        benign_manifest_path=args.benign_manifest or cfg.benign_manifest_path,
     )
 
 
@@ -156,6 +172,12 @@ def cmd_train(args, cfg: TrainingConfig) -> None:
     if args.early_stopping_threshold is not None:
         cfg.early_stopping_threshold = args.early_stopping_threshold
     cfg.allow_noisy_data = args.allow_noisy_data
+    if getattr(args, "contrastive", False):
+        cfg.contrastive = True
+    if getattr(args, "contrastive_lambda", None) is not None:
+        cfg.contrastive_lambda = args.contrastive_lambda
+    if getattr(args, "contrastive_temperature", None) is not None:
+        cfg.contrastive_temperature = args.contrastive_temperature
     train(cfg)
 
 

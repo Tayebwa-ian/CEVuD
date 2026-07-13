@@ -62,6 +62,26 @@ class TrainingConfig:
     chunk_overlap: int = 8
     chunk_min_code_lines: int = 2
 
+    # ── Verified-benign controls (safe-counterpart remedy) ────────────────
+    # Path to a manifest produced by ``src/scripts/mine_benign_functions.py``.
+    # When set, ``build-dataset`` merges genuine (label=0) functions that were
+    # NOT touched by any vulnerability-fixing commit into the training pool, so
+    # the classifier learns what *clean* code looks like (not just
+    # pre-fix vs post-fix). See docs/SAFE_COUNTERPARTS.md.
+    benign_manifest_path: str | None = None
+
+    # ── Optional contrastive objective (safe-counterpart remedy, Step 2) ──
+    # When enabled, a supervised-contrastive term is added on top of the
+    # cross-entropy loss: a ``vulnerable`` function is pulled toward its
+    # ``fixed`` twin and pushed from ``benign_control`` functions. This uses
+    # the (vulnerable, fixed) pair as a *contrastive* signal instead of a
+    # hard label=0 target, which is more robust to the noise a post-fix
+    # function can carry. OFF by default — the standard CE objective is the
+    # recommended/reported training setup; contrastive is for experiments.
+    contrastive: bool = False
+    contrastive_lambda: float = 0.1
+    contrastive_temperature: float = 0.1
+
     # ── Split ratios ────────────────────────────────────────────────────────
     val_fraction: float = 0.2
     test_fraction: float = 0.2

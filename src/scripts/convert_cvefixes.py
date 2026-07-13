@@ -78,6 +78,7 @@ from data_quality import (  # noqa: E402
     _is_noise_file,
     code_signal_line_count,
     is_trivial_change,
+    normalize_code,
 )
 
 # ---------------------------------------------------------------------------
@@ -220,6 +221,7 @@ def convert_cvefixes(
     noise_filter: bool = True,
     trivial_filter: bool = True,
     min_code_lines: int = 2,
+    dedup: bool = True,
 ) -> None:
     """Converts CVEfixes to a CEVuD benchmark manifest.
 
@@ -241,13 +243,20 @@ def convert_cvefixes(
             than this many lines of real code signal (comments/docstrings/
             version assignments do not count). Prevents training on snippets
             that are, e.g., a single ``__version__ = '3.7'`` line.
+        dedup: When True (default), drop a (vuln, safe) pair if its normalized
+            text duplicates an already-emitted sample (redundancy) or collides
+            with the OPPOSITE label (a hard contradiction the classifier cannot
+            learn). Keeps the manifest compact and noise-free.
     """
     ds = _load_source(dataset_id, local_dir, split)
 
     samples_by_project: Dict[str, List[Dict[str, Any]]] = {}
     project_repo_urls: Dict[str, str] = {}
     total_seen = total_skipped = total_added = 0
-    skipped_noise = skipped_trivial = skipped_short = 0
+    skipped_noise = skipped_trivial = skipped_short = skipped_no_safe = 0
+    # normalized source_code -> label, to drop duplicate / contradictory pairs
+    # across the whole manifest (redundancy + hard-label-noise control).
+    seen_norm: Dict[str, int] = {}
 
     # Stream row-by-row — no memory explosion
     for row in ds:
@@ -278,13 +287,20 @@ def convert_cvefixes(
             total_skipped += 1
             continue
 
+        # ── Resolve the changed Python file ──────────────────────────────────
+        # Prefer the path parsed from the unified diff (authoritative — every
+        # CVEfixes row carries a diff), falling back to the dataset's
+        # ``file_paths`` column (some exports omit it). Without a resolvable
+        # .py file there is nothing to clone, so skip.
+        diff = _resolve_diff_with_context(row)
+        anchors = parse_diff_anchors(diff) if diff else {}
         file_paths = row.get("file_paths") or []
-        py_files = [str(f) for f in file_paths if str(f).endswith(".py")]
-        if not py_files:
-            # No Python source file in this row's diff — nothing to clone.
+        py_candidates = [f for f in anchors if str(f).endswith(".py")]
+        py_candidates += [str(f) for f in file_paths if str(f).endswith(".py")]
+        if not py_candidates:
             total_skipped += 1
             continue
-        file_path = py_files[0]
+        file_path = py_candidates[0]
 
         # ── Noise-file filter ────────────────────────────────────────────────
         # Docs/tests/packaging/version files produce pairs whose only diff is a
@@ -294,15 +310,13 @@ def convert_cvefixes(
             skipped_noise += 1
             continue
 
-        diff = _resolve_diff_with_context(row)
-        anchors = parse_diff_anchors(diff) if diff else {}
         anchor = anchors.get(file_path)
         if anchor is None:
             # Could not locate the changed function in the diff; skip.
             total_skipped += 1
             continue
 
-        # ── Minimum code-signal filter ───────────────────────────────────────
+        # ── Minimum code-signal filter (vulnerable side) ─────────────────────
         # A snippet with no real code (e.g. a lone ``__version__ = '3.6'``)
         # carries no learnable signal and would just add label noise.
         if code_signal_line_count(code) < min_code_lines:
@@ -317,9 +331,17 @@ def convert_cvefixes(
         fixed_code = _resolve_fixed_code(row)
 
         def _make_sample(s_code: str, s_label: int, s_start: int, s_end: int,
-                         s_target_commit: str, s_function_name: str) -> Dict[str, Any]:
+                          s_target_commit: str, s_function_name: str,
+                          s_subtype: str) -> Dict[str, Any]:
             """Builds a single BenchmarkSample dict for one (pre- or post-fix)
-            version of the changed function."""
+            version of the changed function.
+
+            ``s_subtype`` disambiguates *why* the sample carries its label
+            for the safe-counterpart audit (see docs/SAFE_COUNTERPARTS.md):
+              - "vulnerable" : the pre-fix (label=1) half of the pair.
+              - "fixed"       : the post-fix (label=0) half — the "safe
+                              counterpart" we are auditing for bundled edits.
+            """
             return {
                 # Unique id per emitted version so vulnerable + safe never
                 # collide inside the same project.
@@ -330,6 +352,7 @@ def convert_cvefixes(
                 "end_line": s_end,
                 "label": s_label,
                 "vulnerability_type": vuln_type,
+                "sample_subtype": s_subtype,
                 "source_code": s_code,             # fallback if clone / git-show fails
                 "fixed_code": fixed_code,
                 "repo_url": repo_url,
@@ -349,21 +372,45 @@ def convert_cvefixes(
         # label=0 companion for every vulnerable row — a naturally *balanced*
         # 1:1 dataset. We explicitly pin target_commit to the fix commit so the
         # extractor reads the CORRECT (patched) file for this sample.
+        # ── Resolve the SAFE (post-fix) companion ────────────────────────────
+        # The balanced 1:1 design needs BOTH a vulnerable and a safe sample. A
+        # row whose fix left no post-fix code cannot form a pair, so skip it
+        # rather than emitting an orphan vulnerable sample that skews the
+        # class balance.
         safe_code = fixed_code.strip() if fixed_code and fixed_code.strip() else None
+        if safe_code is None:
+            skipped_no_safe += 1
+            continue
 
-        # ── Trivial / contradictory-pair filter ──────────────────────────────
+        # ── Trivial / short / redundant / contradictory-pair filters ──────────
         # If the vulnerable and fixed snippets differ ONLY in non-semantic ways
         # (comments, docstrings, version bumps) the (vuln, safe) pair is pure
-        # label noise — the model would be trained on near-identical text with
-        # opposite labels. Drop the whole pair (both sides) in that case, and
-        # also drop when the safe side has no learnable code signal.
-        if safe_code is not None:
-            if trivial_filter and is_trivial_change(code, safe_code):
-                skipped_trivial += 1
+        # label noise. Drop the whole pair. Also drop when the safe side has no
+        # learnable code signal, or when the pair duplicates / contradicts an
+        # already-emitted sample (e.g. the same function fixed in several
+        # commits, or identical text with both labels).
+        if trivial_filter and is_trivial_change(code, safe_code):
+            skipped_trivial += 1
+            continue
+        if code_signal_line_count(safe_code) < min_code_lines:
+            skipped_short += 1
+            continue
+        if dedup:
+            norm_v = normalize_code(code)
+            norm_s = normalize_code(safe_code)
+            drop = False
+            for nrm, lab in ((norm_v, 1), (norm_s, 0)):
+                if nrm in seen_norm:
+                    if seen_norm[nrm] == lab:
+                        skipped_dup += 1
+                    else:
+                        skipped_contradiction += 1
+                    drop = True
+                    break
+            if drop:
                 continue
-            if code_signal_line_count(safe_code) < min_code_lines:
-                skipped_short += 1
-                continue
+            seen_norm[norm_v] = 1
+            seen_norm[norm_s] = 0
 
         # ── VULNERABLE sample (pre-fix version) ───────────────────────────────
         # The pre-image anchor locates the vulnerable function in the PARENT of
@@ -373,7 +420,7 @@ def convert_cvefixes(
         vuln_end = int(anchor["pre_end"])
         vuln_func = _infer_function_name(code) or "unknown_function"
         samples_by_project[project_name].append(
-            _make_sample(code, 1, vuln_start, vuln_end, None, vuln_func)
+            _make_sample(code, 1, vuln_start, vuln_end, None, vuln_func, "vulnerable")
         )
         total_added += 1
 
@@ -382,7 +429,7 @@ def convert_cvefixes(
             safe_end = int(anchor["post_end"])
             safe_func = _infer_function_name(safe_code) or "unknown_function"
             samples_by_project[project_name].append(
-                _make_sample(safe_code, 0, safe_start, safe_end, commit_id, safe_func)
+                _make_sample(safe_code, 0, safe_start, safe_end, commit_id, safe_func, "fixed")
             )
             total_added += 1
 
@@ -421,6 +468,9 @@ def convert_cvefixes(
     print(f"  Skipped noise : {skipped_noise:,}  (docs/tests/packaging/version files)")
     print(f"  Skipped short : {skipped_short:,}  (< {min_code_lines} code-signal lines)")
     print(f"  Skipped trivial: {skipped_trivial:,}  (vuln==safe up to comments/version)")
+    print(f"  Skipped no-safe: {skipped_no_safe:,}  (no post-fix code -> no balanced pair)")
+    print(f"  Skipped dup   : {skipped_dup:,}  (duplicate pairs)")
+    print(f"  Skipped contra: {skipped_contradiction:,}  (identical text, both labels)")
     print(f"  Samples added : {total_added:,}")
     print(f"  Projects      : {len(manifest):,}")
     print(f"  Output        : {output_path}")
@@ -513,6 +563,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "many lines of real code signal. Default: 2."
         ),
     )
+    p.add_argument(
+        "--no-dedup",
+        dest="dedup",
+        action="store_false",
+        default=True,
+        help=(
+            "Disable duplicate / contradiction filtering (keeps identical "
+            "pairs and hard label contradictions)."
+        ),
+    )
     return p
 
 
@@ -525,6 +585,6 @@ if __name__ == "__main__":
         split=args.split,
         local_dir=args.local_dir,
         noise_filter=args.noise_filter,
-        trivial_filter=args.no_trivial_filter,
+        trivial_filter=args.trivial_filter,
         min_code_lines=args.min_code_lines,
     )

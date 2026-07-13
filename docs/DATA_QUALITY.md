@@ -33,6 +33,30 @@ heuristics, and every stage of the pipeline now rejects noisy samples:
 | Dataset build | `src/training/dataset_builder.py` | Defensive pass drops contradictory / low-signal enriched samples after full-function expansion |
 | Trainer | `src/training/trainer.py` | Pre-flight guard refuses to train when ≥5% of samples are contradictory (override with `--allow-noisy-data`) |
 
+### The *inter-pair* complement: bundled-edit contamination
+
+The filters above catch **intra-pair** noise (a single (vuln, safe) pair that
+is near-identical or trivial). They do **not** catch **inter-pair** noise: a
+fix commit that bundles an *unrelated* edit into the same function, so the
+`label=0` ("fixed") sample differs from its twin for non-security reasons.
+
+Two helpers in `src/data_quality.py` address this, and they are the basis of
+the safe-counterpart methodology documented in `docs/SAFE_COUNTERPARTS.md`:
+
+* **`changed_line_ratio(a, b)`** — the `difflib`-based fraction of
+  (combined) lines that differ between two snippets (0.0–1.0).
+* **`is_substantial_change(a, b, threshold=0.5)`** — True when the two
+  snippets differ across more than `threshold` of their lines, i.e. the fix
+  commit reworked the function rather than just patching it.
+
+`src/scripts/diagnose_safe_counterparts.py` pairs each vulnerable sample with
+its post-fix twin (matched by normalized text, **no cloning needed** — both
+halves are embedded inline in the manifest) and reports the trivial vs
+substantial split plus a `changed_line_ratio` histogram. Run it *before* any
+training run you intend to report; if the substantial fraction is large, the
+post-fix "safe" class is contaminated and you should inject verified-benign
+controls (Step 1 of `docs/SAFE_COUNTERPARTS.md`) before training.
+
 ### The heuristics (all conservative — they never drop a real code change)
 
 * **Noise files** (`_is_noise_file`): paths containing `docs/`, `tests/`,

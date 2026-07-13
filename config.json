@@ -71,6 +71,13 @@
       "max_lines": 64,
       "overlap": 8,
       "min_code_lines": 2
+    },
+    "benign_manifest_path": null,
+    "contrastive": {
+      "_comment": "OPTIONAL, EXPERIMENTAL (Step 2 of the safe-counterpart remedy, docs/SAFE_COUNTERPARTS.md). When enabled, a supervised-contrastive term is added on top of the cross-entropy loss: a vulnerable function is pulled toward its fixed twin and pushed from benign_control functions. The recommended, reported training setup keeps this OFF (standard CE on vulnerable=1 / fixed=0 / benign_control=0).",
+      "enabled": false,
+      "lambda": 0.1,
+      "temperature": 0.1
     }
   }
 }
