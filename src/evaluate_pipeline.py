@@ -277,7 +277,10 @@ class PipelineEvaluator:
             "f1_score": round(2 * (tp / (tp + fp) * (tp / (tp + fn))) / ((tp / (tp + fp)) + (tp / (tp + fn))) if (tp + fp) > 0 and (tp + fn) > 0 else 0.0, 4),
             "specificity": round(tn / (tn + fp) if (tn + fp) > 0 else 0.0, 4),
             "token_reduction_rate": round((1 - (escalations / total)) * 100 if total > 0 else 0.0, 2),
-            "cost_savings_ratio": round(((total - escalations) / total) * 100 if total > 0 else 0.0, 2)
+            # Cost reduction vs the Always-LLM baseline. The local gate scan
+            # (Semgrep + edge SLM) still costs ~2% of an LLM call, so Cost
+            # reduction = TRR * (1 - cost_ratio). See docs/METRICS.md.
+            "cost_savings_ratio": round((1 - (escalations / total)) * (1 - 0.02) * 100 if total > 0 else 0.0, 2)
         }
 
         confusion_matrix = {"tp": tp, "fp": fp, "fn": fn, "tn": tn}

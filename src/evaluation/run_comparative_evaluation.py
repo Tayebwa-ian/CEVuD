@@ -181,7 +181,7 @@ def _render_markdown_report(
     lines.append(f"Selection metric: `{selection_metric}` "
                   f"(F-beta with beta weighting recall over precision — see metrics.py).\n")
     lines.append("| Strategy | Precision | Recall | F1 | " + selection_metric.upper() +
-                  " | Escalation rate | TRR | CSR |")
+                  " | Escalation rate | TRR | Cost reduction |")
     lines.append("|---|---|---|---|---|---|")
     for name, res in strategy_results.items():
         m = res["aggregate"]
@@ -192,12 +192,18 @@ def _render_markdown_report(
     lines.append("")
     lines.append(
         "Escalation rate is the fraction of samples sent to the Stage 3 LLM — the pipeline's "
-        "direct cost proxy. TRR (token_reduction_rate) and CSR (cost_savings_ratio) are "
-        "reported as 1 - escalation_rate, i.e. the share of samples — and, under CEVuD's "
-        "uniform per-snippet token assumption, the share of tokens — that never reach the LLM. "
-        "`always_llm` is the recall/cost upper bound (TRR=0); `semgrep_only` and "
-        "`codesheriff_only` are equivalent to the 'skip one stage' ablations requested in review "
-        "(see gate_strategies.py docstring for why those pairs collapse to the same rule).\n"
+        "direct cost proxy. **TRR** (Token Reduction Rate, `token_reduction_rate`) = 1 - "
+        "escalation_rate: the share of samples — and, under CEVuD's uniform per-snippet token "
+        "assumption, the share of tokens — that never reach the LLM. **Cost reduction** "
+        "(`cost_savings_ratio`) is the *monetary* saving vs the Always-LLM baseline and is "
+        "deliberately distinct from TRR: the gated pipeline still runs a cheap local scan "
+        "(Semgrep + edge SLM, ~2% of an LLM call) on every snippet, so "
+        "Cost reduction = TRR × (1 − cost_ratio) and sits slightly *below* TRR. As the local "
+        "scan cost → 0 (the paper's 'zero marginal-cost edge' idealisation) the two converge. "
+        "See docs/METRICS.md for the full derivation and justifications. "
+        "`always_llm` is the recall/cost upper bound (TRR=0, Cost reduction=0); `semgrep_only` "
+        "and `codesheriff_only` are equivalent to the 'skip one stage' ablations requested in "
+        "review (see gate_strategies.py docstring for why those pairs collapse to the same rule).\n"
     )
 
     lines.append("## 3. Per-Project Breakdown (CEVuD, tuned, with override)\n")

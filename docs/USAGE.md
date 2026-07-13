@@ -14,6 +14,26 @@ pip install -r requirements.txt
 pip install semgrep
 ```
 
+## What you can run
+
+CEVuD is a set of independent, composable commands. Pick the part(s) you need:
+
+| Part | Command | See |
+|---|---|---|
+| Seed the local RAG vector store | `python src/dataset_ingest.py --mode benchmark\|repo` | [Local execution → Step 1](#1-seed-the-local-vector-store) |
+| Run the static (SAST) scan | `semgrep --config …` | [Local execution → Step 2](#2-run-the-static-analysis-stage) |
+| Run the triage / gating stage | `python src/triage_orchestrator.py …` | [Local execution → Step 3](#3-run-the-triage-stage) |
+| Run the remediation agent | `python src/agent.py …` | [Local execution → Step 4](#4-run-the-remediation-agent) |
+| **Train a custom classifier** | `python -m training.cli train …` | [Training the custom classifier](#training-the-custom-classifier) |
+| Benchmark / evaluate the gate | `python src/evaluation/run_comparative_evaluation.py …` | [Running the comparative evaluation](#running-the-comparative-evaluation) |
+| Run the pipeline end-to-end (eval harness) | `python src/evaluate_pipeline.py …` | `src/evaluate_pipeline.py` |
+| Run the test suite | `python -m pytest tests/` | [Running the tests](#run-the-unit-tests) |
+
+The first four are the **production pipeline** (Stages 1–3); the rest are
+**developer/experiment commands** for building, measuring, and benchmarking the
+system. Every command is also runnable inside the Docker image (see
+[Docker usage](#docker-usage)).
+
 ## Local models (Stage 2 edge classifier)
 
 The zero-cost local gate uses a small vulnerability classifier loaded and
@@ -122,38 +142,93 @@ in-image `config.json` if it lives elsewhere.
 
 After the workflow completes, inspect the uploaded artifact under `workspace_storage/artifacts/run_<sha>/`.
 
-## Training a Custom Few-Shot Classifier
+## Training the custom classifier
 
-CEVuD can fine-tune its own local classifier on the existing CVEFixes benchmark
-without any data augmentation. The training pipeline lives in `src/training/`.
+CEVuD can fine-tune its own local edge classifier (CodeBERT) on a benchmark
+dataset. The training pipeline lives in `src/training/` and exposes four
+sub-commands:
 
-### Build a small balanced dataset
+```bash
+python -m src.training.cli build-dataset ...   # 1. build train/val/test splits
+python -m src.training.cli train ...           # 2. fine-tune CodeBERT
+python -m src.training.cli evaluate ...        # 3. measure the trained model
+python -m src.training.cli run-all ...         # 1 + 2 + 3 in one shot
+```
+
+### Step 1 — Build the dataset
 
 ```bash
 # Few-shot preset: 20 projects, 50 samples/class, ~500 total
-python -m training.cli build-dataset --few-shot --max-workers 8
+python -m src.training.cli build-dataset --few-shot --max-workers 8
 
 # Custom caps:
-python -m training.cli build-dataset \
+python -m src.training.cli build-dataset \
   --max-projects 30 \
   --max-samples-per-class 100 \
   --max-total 1000 \
   --max-workers 8
 
 # With cross-file context (slower):
-python -m training.cli build-dataset --few-shot --cross-file --max-workers 8
+python -m src.training.cli build-dataset --few-shot --cross-file --max-workers 8
 ```
 
-### Train
+### Step 2 — Train (with custom parameters)
+
+Every flag overrides the default in `src/training/config.py`. **`--epochs` is
+only a ceiling** — training always stops early when the validation loss stops
+improving (see `--early-stopping-patience`), so you can safely set a high epoch
+count; the run ends as soon as it plateaus rather than wasting compute.
 
 ```bash
-python -m training.cli train --epochs 3 --batch-size 8 --lr 2e-5
+# Minimal:
+python -m src.training.cli train --epochs 20
+
+# Full custom example:
+python -m src.training.cli train \
+  --epochs 30 \
+  --batch-size 16 \
+  --lr 3e-5 \
+  --freeze-backbone \
+  --early-stopping-patience 5 \
+  --early-stopping-threshold 0.001
 ```
 
-### Evaluate
+`train` flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--epochs` | `20` | Max training passes over the data; early stopping ends sooner |
+| `--batch-size` | `8` | Per-device batch size |
+| `--lr` | `2e-5` | AdamW learning rate |
+| `--freeze-backbone` | off | Freeze CodeBERT, train only the classifier head (sample-efficient) |
+| `--early-stopping-patience` | `3` | Epochs without validation-loss improvement before halting |
+| `--early-stopping-threshold` | `0.0` | Minimum val-loss drop that counts as progress |
+| `--allow-noisy-data` | off | Train despite contradictory samples (not recommended) |
+
+Artifacts are written to `training_output/<run_timestamp>/` (with a stable
+`latest` symlink); `training_summary.json` records the run's metrics and the
+best checkpoint.
+
+### Step 3 — Evaluate the model
 
 ```bash
-python -m training.cli evaluate
+# Uses the most recent model via the `latest` symlink:
+python -m src.training.cli evaluate
+
+# Or point at a specific model / test set:
+python -m src.training.cli evaluate \
+  --model-path training_output/latest/model \
+  --test-path src.training_data/test.jsonl \
+  --output-dir training_output/latest/eval
+```
+
+Writes `metrics.json` plus confusion-matrix, ROC, PR, and calibration plots.
+Reported model metrics: accuracy, precision, recall, F1, F2, ROC-AUC, PR-AUC.
+
+### One-shot
+
+```bash
+python -m src.training.cli run-all --few-shot --epochs 20 --freeze-backbone
 ```
 
 ### Deploy
@@ -318,11 +393,20 @@ for every project. Levers, cheapest first:
 * **`--limit` at convert time** — fewer projects / samples.
 
 #### Cost KPIs in the report
-The comparative report now surfaces **TRR** (Token Reduction Rate) and
-**CSR** (Cost Savings Ratio) alongside `escalation_rate`. Both equal
-`1 - escalation_rate` — the share of samples (and, under CEVuD's
-uniform per-snippet token assumption, the share of tokens) that never
-reach the LLM. Recall is centered via the `F2` selection metric
+The comparative report surfaces **TRR** (Token Reduction Rate) and
+**Cost reduction** (a.k.a. CSR / `cost_savings_ratio`) alongside
+`escalation_rate`. They are *deliberately distinct* metrics, not duplicates:
+
+- **TRR** `= 1 − escalation_rate` — the share of samples (and, under CEVuD's
+  uniform per-snippet token assumption, the share of tokens) that never reach
+  the LLM. A raw *volume* metric.
+- **Cost reduction** `= TRR × (1 − r)` where `r = c_gate / c_llm` (default
+  `0.02`) — the *monetary* saving vs the Always-LLM baseline. It sits slightly
+  *below* TRR because the gated pipeline still runs a cheap local scan (Semgrep
+  + edge SLM) on every snippet. As `r → 0` the two converge.
+
+Full formulas and justifications (incl. the cost-model derivation) are in
+`docs/METRICS.md`. Recall is centered via the `F2` selection metric
 (beta=2 weights recall twice as heavily as precision).
 
 ### Evaluation Output

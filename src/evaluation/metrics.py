@@ -49,7 +49,12 @@ def confusion_counts(predictions: List[bool], labels: List[int]) -> Dict[str, in
     return {"tp": tp, "fp": fp, "fn": fn, "tn": tn}
 
 
-def compute_metrics(predictions: List[bool], labels: List[int], beta: float = 2.0) -> Dict[str, Any]:
+def compute_metrics(
+    predictions: List[bool],
+    labels: List[int],
+    beta: float = 2.0,
+    cost_ratio: float = 0.02,
+) -> Dict[str, Any]:
     """Computes the full metric set from predictions vs. ground truth.
 
     Args:
@@ -57,11 +62,19 @@ def compute_metrics(predictions: List[bool], labels: List[int], beta: float = 2.
         labels: Per-sample ground truth (1 = vulnerable, 0 = safe).
         beta: F-beta weighting; beta > 1 weights recall more heavily than
             precision (see module docstring). Default 2.0.
+        cost_ratio: ``c_gate / c_llm`` — the per-snippet cost of the *local*
+            gate scan (Semgrep + edge SLM) as a fraction of a full LLM call.
+            Drives the Cost-reduction KPI; see ``cost_savings_ratio`` below and
+            docs/METRICS.md. Default 0.02 (the local scan costs ~2% of an LLM
+            call), so Cost reduction is slightly *below* TRR. Set to 0.0 to
+            recover the paper's "zero marginal-cost edge" idealisation where
+            Cost reduction == TRR.
 
     Returns:
         Dict[str, Any]: confusion matrix counts plus precision, recall,
-            f1, f_beta, accuracy, specificity, and escalation_rate
-            (fraction of samples sent to the LLM — the pipeline's cost proxy).
+            f1, f_beta, accuracy, specificity, escalation_rate (fraction of
+            samples sent to the LLM), token_reduction_rate (TRR), and
+            cost_savings_ratio (Cost reduction).
     """
     cm = confusion_counts(predictions, labels)
     tp, fp, fn, tn = cm["tp"], cm["fp"], cm["fn"], cm["tn"]
@@ -83,14 +96,27 @@ def compute_metrics(predictions: List[bool], labels: List[int], beta: float = 2.
     escalations = tp + fp
     escalation_rate = escalations / total if total > 0 else 0.0
 
-    # Cost KPIs (the paper's TRR / CSR). Under CEVuD's assumption that
-    # each escalated snippet is a function-level unit of roughly uniform token
-    # cost, the fraction of samples NOT sent to the LLM equals the fraction
-    # of tokens saved. If real per-sample token counts ever become available
-    # they should replace `escalation_rate` here; until then this is the
-    # standard, defensible proxy used throughout the paper.
+    # TRR (Token Reduction Rate): the fraction of snippets — and, under
+    # CEVuD's uniform per-snippet token assumption, the fraction of *tokens* —
+    # that the gate keeps away from the LLM. This is a raw *volume* metric.
     token_reduction_rate = round(1.0 - escalation_rate, 4)
-    cost_savings_ratio = round(1.0 - escalation_rate, 4)
+
+    # Cost reduction (a.k.a. CSR / cost_savings_ratio): the *monetary* saving
+    # versus the Always-LLM baseline. The gated pipeline is not free — every
+    # non-escalated snippet still costs the cheap local scan (Semgrep + edge
+    # SLM, unit cost c_gate), whereas an escalated snippet costs a full LLM
+    # call (unit cost c_llm, with c_llm >> c_gate). With cost_ratio r = c_gate
+    # / c_llm:
+    #     Cost_full   = N * c_llm
+    #     Cost_gated  = N_esc * c_llm + (N - N_esc) * c_gate
+    #     CR          = 1 - Cost_gated / Cost_full
+    #                = (1 - escalation_rate) * (1 - r)
+    #                = TRR * (1 - r)
+    # So Cost reduction is a genuinely distinct, monetisable KPI that sits
+    # slightly *below* TRR (the local scan still costs something). As r -> 0
+    # (the paper's "zero marginal-cost edge" idealisation) Cost reduction
+    # converges to TRR. See docs/METRICS.md for the full derivation.
+    cost_savings_ratio = round(token_reduction_rate * (1.0 - max(0.0, min(1.0, cost_ratio))), 4)
 
     return {
         "confusion_matrix": cm,

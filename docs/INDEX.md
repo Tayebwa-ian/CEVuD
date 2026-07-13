@@ -27,6 +27,7 @@ the repository root is the high-level navigation hub and links back here.
 | `docs/DATASET_CARD.md` | Schema and provenance of the CVEfixes (training) and VUDENC (gate-study) manifests. |
 | `docs/MODEL_CARD.md` | The custom Stage-2 CodeBERT classifier: architecture, training data, procedure, limitations. |
 | `docs/SLM_CHUNKING.md` | **New.** Research on vulnerability-detection approaches we borrow from, plus the chunked-SLM + cross-context-argumentation design. |
+| `docs/METRICS.md` | **New.** Canonical metric definitions, formulas, and justifications: recall, F1/F2, TRR, Cost reduction (and supporting confusion-matrix / precision / specificity / escalation-rate metrics) for both the model and the pipeline. |
 | `docs/SAFE_COUNTERPARTS.md` | **New.** The "safe counterpart" problem & fix: why the post-fix function is a *noisy/relative* negative, how we measure the contamination, and the three-step remedy (diagnose → verified-benign controls → optional contrastive). Authoritative methodology for the paper. |
 | `docs/research_outline.md` | Research write-up / paper outline referencing the classifier and corpora. |
 
