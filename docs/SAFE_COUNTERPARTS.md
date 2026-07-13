@@ -193,6 +193,14 @@ python -m src.training.cli build-dataset \
   sample from the same repo? — actually it *does* share the repo; see §6).
 * They count as `label=0`, so the existing few-shot `max_per_class` caps
   automatically balance them against the vulnerable and post-fix samples.
+* **Always-included (important).** Benign-control projects are named
+  `benign::<repo>` and are pulled *out* of `select_projects` (which
+  selects by CWE coverage / `--max-projects`). Otherwise a `--few-shot`
+  run would silently drop them (their `vulnerability_type` is
+  `"benign"`, which carries almost no CWE-coverage weight), defeating the
+  entire remedy. They are therefore **always added to the pool** regardless
+  of how many primary (vulnerable) projects are selected, while still
+  keeping their own project identity for leakage safety.
 * The data-quality contradiction pass still drops any benign control whose text
   collides with a vulnerable sample (a genuine hard contradiction).
 
@@ -278,9 +286,92 @@ and `dataset_summary.json` now reports a `sample_subtypes` breakdown.
 > vuln and benign, merge them under a single project name; the default keeps
 > them separate for transparency.)
 
+> **Validity threat — same-repo overlap (state it in the paper).** Because
+> benign controls are mined from the *same* CVEfixes repositories as
+> the vulnerabilities, the SLM's *training distribution* and the benign
+> "safe" class partly overlap at the repo level. Two consequences:
+> (i) in **training**, a benign control from repo X and a vulnerable
+> sample from repo X share repo-level style — harmless for the classifier,
+> but it means the model is not tested on a repo it never saw;
+> (ii) in the **VUDENC gate study** (§4.2), the merged benign
+> controls are CVEfixes-derived, so the "safe" precision there is
+> measured *in-distribution* (same repos the SLM trained on), not on
+> truly held-out code. To claim genuine out-of-distribution
+> safe-precision, mine benign controls from a *disjoint* repository
+> set (e.g. a separate corpus such as CodeSearchNet) and merge those
+> instead. The shipped `mine_benign_functions.py` uses CVEfixes repos
+> by default because that maximises reuse of already-cloned history;
+> swapping the input manifest is a one-line change.
+
 ---
 
-## 7. Reproducibility checklist
+## 7b. Generating a sufficient, well-balanced dataset in a 2–4 h budget
+
+The goal: train the model **well** (enough benign signal + enough
+CVEfixes pairs) without the run blowing past a few hours. Three
+levers, in order:
+
+1. **Mine as many benign controls as possible (one-time, network).**
+   The miner revisits every fix commit and pulls functions from the
+   files the commit did NOT touch. To maximize yield, raise the
+   per-commit and per-repo ceilings:
+   ```bash
+   python src/scripts/mine_benign_functions.py \
+       --manifest benchmark_manifest_cvefixes.json \
+       --output benign_controls_manifest.json \
+       --samples-per-commit 20 --max-commits 100000 --max-workers 8
+   ```
+   (`--max-commits 100000` is "process every fix commit"; the
+   dedup set keeps it from exploding with repeats). This step is
+   **separate from training** — run it once and reuse the manifest.
+
+2. **Bound the training set, don't let benign dominate.**
+   Benign controls are `label=0`, so without a cap they can outnumber
+   the vulnerable class and slow convergence. `build-dataset` caps via
+   `--max-samples-per-class` / `--max-total`; the benign projects are
+   **always included** (see §4.1) but still respect those caps:
+   ```bash
+   python -m src.training.cli build-dataset \
+       --manifest benchmark_manifest_cvefixes.json \
+       --benign-manifest benign_controls_manifest.json \
+       --max-total 8000 --max-samples-per-class 3000
+   ```
+   This keeps the set large (enough to train well) yet bounded
+   (so the CodeBERT run fits the 2–4 h window; chunking
+   multiplies effective samples but each chunk is tiny/fast).
+
+3. **Train with early stopping, not a huge fixed epoch count.**
+   Keep the high ceiling but let early stopping halt once validation
+   loss plateaus:
+   ```bash
+   python -m src.training.cli train --epochs 20 --batch-size 8 --lr 2e-5
+   ```
+   On a GPU this finishes in minutes; on CPU it lands in the
+   2–4 h window. The `dataset_summary.json` `sample_subtypes`
+   breakdown confirms how many `vulnerable` / `fixed` / `benign_control`
+   rows actually fed the model.
+
+> **Cloning + cleanup are guaranteed.** Every clone in this pipeline
+> (`dataset_builder`, `mine_benign_functions`, `diagnose_safe_counterparts`,
+> and the evaluation extractor via `resolve_project_workspace`) is
+> deleted in a `finally` block immediately after the needed
+> information is extracted. No repository source is left on disk after
+> any of these steps. (Audit: `grep -n "rmtree" src/` — every
+> `clone_repo` call site has a matching delete.)
+
+> **Semgrep is a HARD, non-skippable Stage-1 input.** The reported
+> gate study MUST run `run_comparative_evaluation.py` **without**
+> `--cache` (which reuses a cached `raw_scores.json` and skips
+> Semgrep **and** the SLM) and **without** `--inline` for the
+> final numbers (inline still runs Semgrep but only over the
+> isolated materialized snippets, not the real repo root). If `semgrep`
+> is not installed, `raw_score_extractor._run_semgrep` now **fails
+> fast** with a clear message instead of silently emitting severity
+> 0.0 for every sample.
+
+---
+
+## 8. Reproducibility checklist
 
 ```bash
 # 0. (optional) diagnose the post-fix "safe" class — no network needed

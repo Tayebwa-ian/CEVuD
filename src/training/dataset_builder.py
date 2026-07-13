@@ -434,15 +434,31 @@ def build_dataset(
     os.makedirs(str(cache_root), exist_ok=True)
 
     projects = load_manifest(manifest_path)
+    benign_projects: List = []
     if benign_manifest_path:
         try:
             benign_projects = load_manifest(benign_manifest_path)
-            projects.extend(benign_projects)
-            print(f"[*] Merged {len(benign_projects)} benign-control project(s) "
+            print(f"[*] Loaded {len(benign_projects)} benign-control project(s) "
                   f"from {benign_manifest_path}")
         except Exception as exc:
             print(f"[!] Could not load benign manifest '{benign_manifest_path}': {exc}")
-    projects = select_projects(projects, max_projects)
+
+    # Keep benign controls SEPARATE from project selection. `select_projects`
+    # chooses by CWE coverage / `--max-projects`; benign controls are
+    # tagged vulnerability_type="benign", which would give them almost no
+    # coverage weight and let `--few-shot` silently DROP them — defeating
+    # the whole safe-counterpart remedy. They always keep their own
+    # project identity, so the project-level split still prevents leakage,
+    # and they are always included in the training pool regardless of
+    # how many primary (vulnerable) projects are selected.
+    primary = [p for p in projects if not p.project.startswith("benign::")]
+    benign_from_manifest = [p for p in projects if p.project.startswith("benign::")]
+    benign_projects = benign_projects + benign_from_manifest
+    selected_primary = select_projects(primary, max_projects)
+    projects = selected_primary + benign_projects
+    if benign_projects:
+        print(f"[*] Always-include {len(benign_projects)} benign-control "
+              f"project(s) (not subject to CWE-coverage selection).")
     print(f"[*] Building dataset from {len(projects)} projects ...")
 
     enriched: List[EnrichedSample] = []

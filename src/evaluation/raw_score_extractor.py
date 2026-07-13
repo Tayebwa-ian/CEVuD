@@ -61,7 +61,23 @@ def _run_semgrep(project_root: str, output_path: str, custom_rules_path: str) ->
     project's Dockerfile) once over the whole project root and returns the
     parsed JSON results. A single run per project, regardless of how many
     labeled samples that project has.
+
+    The Stage-1 (static taint) severity is a HARD input to the gate
+    — if Semgrep never runs, every sample gets severity 0.0 and the
+    whole comparative study is meaningless. We therefore FAIL FAST if the
+    `semgrep` binary is not on PATH (rather than silently emitting
+    empty results), so a misconfigured environment cannot produce a
+    no-Semgrep report by accident.
     """
+    import shutil as _shutil  # local import keeps the failure path dependency-free
+    if _shutil.which("semgrep") is None:
+        raise RuntimeError(
+            "Semgrep is not installed / not on PATH. Stage-1 severity is a "
+            "required input to the gate and CANNOT be skipped. Install it with "
+            "`pip install semgrep` (or `pipx install semgrep`) and re-run. "
+            "Do NOT use --cache to bypass this — --cache reuses a prior "
+            "raw_scores_cache.json and will produce a report with no Semgrep signal."
+        )
     cmd = [
         "semgrep",
         "--config", "p/python",
@@ -75,6 +91,7 @@ def _run_semgrep(project_root: str, output_path: str, custom_rules_path: str) ->
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode not in (0, 1):  # semgrep exits 1 when findings exist; that's not an error
         print(f"[!] semgrep exited with code {result.returncode}:\n{result.stderr}")
+
 
     if os.path.exists(output_path):
         with open(output_path, "r", encoding="utf-8") as f:

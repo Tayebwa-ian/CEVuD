@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import os
 import random
@@ -75,6 +76,17 @@ from data_quality import code_signal_line_count, normalize_code  # noqa: E402
 
 
 _GIT_LOCK = threading.Lock()
+# Guards the shared ``seen_norm`` dedup set across the worker threads
+# (a plain ``set`` check-then-add is a TOCTOU race without it).
+_STATE_LOCK = threading.Lock()
+
+
+def _commit_seed(commit: str, seed: int) -> int:
+    """Stable, per-commit RNG seed (deterministic across runs, unlike
+    the salted built-in ``hash``). Avoids sharing one ``random.Random``
+    across threads, which is not thread-safe."""
+    digest = hashlib.md5(commit.encode("utf-8")).hexdigest()
+    return (seed + int(digest[:8], 16)) & 0x7FFFfffF
 
 
 def _git(repo: str, *args, timeout: int = 120) -> subprocess.CompletedProcess:
@@ -107,11 +119,19 @@ def _collect_benign_for_commit(
     commit: str,
     samples_per_commit: int,
     min_code_lines: int,
-    rng: random.Random,
+    seed: int,
     seen_norm: Set[str],
+    state_lock: threading.Lock,
 ) -> List[Dict[str, Any]]:
     """Return up to ``samples_per_commit`` benign functions from files the
-    commit did NOT modify."""
+    commit did NOT modify.
+
+    Thread-safety: ``seen_norm`` is a shared ``set`` across workers, so
+    the check-then-add is guarded by ``state_lock``. The per-call RNG
+    is derived deterministically from ``(seed, commit)`` (via a stable
+    MD5 hash) so each commit gets a reproducible shuffle without sharing a
+    single ``random.Random`` across threads (which is not thread-safe).
+    """
     if not _checkout(repo, commit):
         return []
 
@@ -123,6 +143,7 @@ def _collect_benign_for_commit(
         ln.strip() for ln in ls.stdout.splitlines() if ln.strip() and ln.strip() not in modified
     ]
 
+    rng = random.Random(_commit_seed(commit, seed))
     rng.shuffle(candidates)
     collected: List[Dict[str, Any]] = []
     for rel in candidates:
@@ -149,9 +170,10 @@ def _collect_benign_for_commit(
             if code_signal_line_count(func_src) < min_code_lines:
                 continue
             norm = normalize_code(func_src)
-            if norm in seen_norm:
-                continue  # dedup across commits / projects
-            seen_norm.add(norm)
+            with state_lock:
+                if norm in seen_norm:
+                    continue  # dedup across commits / projects
+                seen_norm.add(norm)
             snippet = build_context_snippet(
                 content, (start, end), imports, {}
             )
@@ -184,8 +206,9 @@ def _process_project(
     max_commits: int,
     max_per_project: Optional[int],
     min_code_lines: int,
-    rng: random.Random,
+    seed: int,
     seen_norm: Set[str],
+    state_lock: threading.Lock,
 ) -> List[Dict[str, Any]]:
     if project.git_source is None:
         return []  # benign mining requires a real repo
@@ -206,7 +229,8 @@ def _process_project(
             if max_per_project and len(out) >= max_per_project:
                 break
             found = _collect_benign_for_commit(
-                dest, commit, samples_per_commit, min_code_lines, rng, seen_norm
+                dest, commit, samples_per_commit, min_code_lines,
+                seed, seen_norm, state_lock,
             )
             out.extend(found)
             if max_per_project:
@@ -234,15 +258,15 @@ def mine_benign(
     seed: int = 42,
 ) -> None:
     projects = load_manifest(manifest_path)
-    rng = random.Random(seed)
     seen_norm: Set[str] = set()
+    state_lock = threading.Lock()
     benign_by_project: Dict[str, List[Dict[str, Any]]] = {}
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(
                 _process_project, p, samples_per_commit, max_commits,
-                max_per_project, min_code_lines, rng, seen_norm,
+                max_per_project, min_code_lines, seed, seen_norm, state_lock,
             ): p
             for p in projects
         }
@@ -257,6 +281,7 @@ def mine_benign(
         all_samples: List[Dict[str, Any]] = []
         for s in benign_by_project.values():
             all_samples.extend(s)
+        rng = random.Random(seed)
         rng.shuffle(all_samples)
         all_samples = all_samples[:max_total]
         grouped: Dict[str, List[Dict[str, Any]]] = {}
@@ -297,10 +322,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--manifest", required=True, help="benchmark_manifest_cvefixes.json")
     p.add_argument("--output", default="benign_controls_manifest.json",
                     help="Output manifest path.")
-    p.add_argument("--samples-per-commit", type=int, default=3,
-                    help="Max benign functions mined per fix commit (default 3).")
-    p.add_argument("--max-commits", type=int, default=50,
-                    help="Max fix commits processed per repo (default 50).")
+    p.add_argument("--samples-per-commit", type=int, default=10,
+                    help="Max benign functions mined per fix commit (default 10; "
+                         "raise for 'as many as possible').")
+    p.add_argument("--max-commits", type=int, default=200,
+                    help="Max fix commits processed per repo (default 200). "
+                         "Pass a very large number (or edit to None) to process "
+                         "EVERY fix commit — maximizes benign yield.")
     p.add_argument("--max-per-project", type=int, default=None,
                     help="Max benign samples per repo (default: unlimited).")
     p.add_argument("--max-total", type=int, default=None,

@@ -100,14 +100,17 @@ RUN if [ -n "$CUSTOM_MODEL_PATH" ]; then \
 # Point ModelManager's cache_dir at the baked model cache so the
 # pre-downloaded weights are reused (no network, fast re-runs).
 # If a custom model was baked, repoint the classifier to it.
-RUN python -c "import json; p='config.json'; d=json.load(open(p)); \
-d['paths']['model_cache_dir']='/app/model_cache'; \
-import os; \
-custom='/app/custom_model'; \
-if os.path.exists(custom) and os.listdir(custom): \
-    d['models']['classifier_model']=custom; \
-    print('[+] Custom classifier model detected at', custom); \
-json.dump(d, open(p,'w'), indent=2)"
+RUN python - <<'PY'
+import json, os
+p = 'config.json'
+d = json.load(open(p))
+d['paths']['model_cache_dir'] = '/app/model_cache'
+custom = '/app/custom_model'
+if os.path.exists(custom) and os.listdir(custom):
+    d['models']['classifier_model'] = custom
+    print('[+] Custom classifier model detected at', custom)
+json.dump(d, open(p, 'w'), indent=2)
+PY
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

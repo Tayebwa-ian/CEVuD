@@ -295,10 +295,22 @@ for every project. Levers, cheapest first:
   every baseline, and the linearity/override ablations all read this cache;
   only `--force-recompute` re-extracts. This is the #1 win for
   iteration (skips the clone + Semgrep + SLM entirely).
+  **Caveat — never use `--cache` for the *reported* gate-study
+  numbers:** it reuses cached `severity_weight` / `slm_score`, i.e. it
+  **skips Semgrep AND the SLM**. The `run_comparative_evaluation.py`
+  runner now prints a loud warning when `--cache` is used, so a
+  no-Semgrep report cannot be produced by accident. Stage-1
+  Semgrep severity is a hard, non-skippable input to the gate;
+  `raw_score_extractor._run_semgrep` also **fails fast** if the
+  `semgrep` binary is missing, rather than silently scoring every
+  sample at severity 0.0.
 * **`--inline`** — score `git_source` projects from their embedded
   `source_code` / `fixed_code` instead of cloning the real repo. Removes
   every `git clone` (and the network round-trip), and is the only mode
-  that runs fully offline / air-gapped.
+  that runs fully offline / air-gapped. **Semgrep still runs** — it just
+  scans the isolated materialized snippets instead of the whole repo
+  root, so it is a weaker (less representative) Stage-1 signal. Use
+  the default (git-clone) path for the reported study.
 * **`--weight-step` / `--threshold-step`** — coarsen the grid
   (e.g. `0.1` → an 11×11 grid) for quick iteration. The default
   `0.05` (21×21) is already cheap; coarsening mostly shrinks the

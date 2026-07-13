@@ -254,6 +254,7 @@ def convert_cvefixes(
     project_repo_urls: Dict[str, str] = {}
     total_seen = total_skipped = total_added = 0
     skipped_noise = skipped_trivial = skipped_short = skipped_no_safe = 0
+    skipped_dup = skipped_contradiction = 0
     # normalized source_code -> label, to drop duplicate / contradictory pairs
     # across the whole manifest (redundancy + hard-label-noise control).
     seen_norm: Dict[str, int] = {}

@@ -191,7 +191,10 @@ class WeightedTrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels = inputs.pop("labels")
-        outputs = model(**inputs)
+        # Request hidden states once (needed by the optional contrastive
+        # term) — costs nothing when contrastive is disabled, and avoids
+        # a second forward pass.
+        outputs = model(**inputs, output_hidden_states=True)
         logits = outputs.logits
         if self.class_weights is not None:
             w = self.class_weights.to(logits.device)
@@ -201,10 +204,13 @@ class WeightedTrainer(Trainer):
         loss = loss_fct(logits.view(-1, self.model.config.num_labels), labels.view(-1))
 
         if self.contrastive:
-            # Second forward pass to obtain [CLS] embeddings for the
-            # supervised-contrastive term. This adds one extra encoder pass
-            # per batch (only when the contrastive objective is enabled).
-            with torch.no_grad():
+            # Reuse the SAME forward (with grad + hidden states) so the
+            # supervised-contrastive term back-propagates into the encoder.
+            # NOTE: the forward above must request output_hidden_states and
+            # must NOT be under torch.no_grad(), or the contrastive term
+            # would carry no gradient and silently fail to train.
+            hidden = outputs.hidden_states
+            if hidden is None:
                 hidden = model(**inputs, output_hidden_states=True).hidden_states
             cls_emb = hidden[-1][:, 0]  # (batch, hidden)
             supcon = _supervised_contrastive_loss(

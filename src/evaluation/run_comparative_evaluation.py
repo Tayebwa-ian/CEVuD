@@ -308,6 +308,21 @@ def main():
           f"{dataset_summary['total_samples']} samples")
 
     extractor = RawScoreExtractor(config_path=args.config)
+    if args.cache and os.path.exists(cache_path) and not args.force_recompute:
+        print(
+            "[!] USING CACHE: Semgrep AND the SLM are SKIPPED — the "
+            "reported severities/slm_scores are reused from "
+            f"{cache_path}. Do NOT use --cache for the *reported* gate-study "
+            "numbers; it is only a fast re-grid/plot path. Run without "
+            "--cache (clone + real Semgrep) for the paper's metrics."
+        )
+    if args.inline:
+        print(
+            "[!] INLINE MODE: repos are NOT cloned; Semgrep still runs, but "
+            "only over the *isolated* materialised snippets (no surrounding "
+            "repo context). Use the default (git clone) path for the reported "
+            "gate study so Semgrep scans the real project root."
+        )
     records = extractor.extract(
         args.manifest, cache_path=cache_path,
         force_recompute=args.force_recompute, force_inline=args.inline,
