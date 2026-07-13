@@ -28,7 +28,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Tuple
 
 import matplotlib
-from run_context import resolve_run_id
+from run_context import resolve_run_id, get_artifact_dir, get_eval_dir, get_triage_report_path
 matplotlib.use("Agg")  # Non-interactive backend for CI/headless environments
 import matplotlib.pyplot as plt
 
@@ -72,16 +72,7 @@ class PipelineEvaluator:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.eval_id = f"eval_{timestamp}"
         
-        ws_root = self.config["paths"]["workspace_root"]
-        evals_sub = self.config["paths"]["evaluations_subdir"]
-
-        # Resolve evaluations destination folder cleanly
-        if os.path.isabs(evals_sub):
-            self.eval_dir = os.path.join(evals_sub, self.eval_id)
-        elif os.path.isabs(ws_root):
-            self.eval_dir = os.path.join(ws_root, evals_sub, self.eval_id)
-        else:
-            self.eval_dir = os.path.join(ws_root, evals_sub, self.eval_id)
+        self.eval_dir = get_eval_dir(".", self.config, self.eval_id)
 
         # Enforce evaluation folder existence for summaries and charts
         os.makedirs(self.eval_dir, exist_ok=True)
@@ -148,7 +139,11 @@ class PipelineEvaluator:
         Invoke the primary production orchestrator pipeline over the evaluation workspace.
         """
         run_id = resolve_run_id(bench_dir, self.config["paths"].get("workspace_root", "workspace_storage"))
-        target_artifact_dir = os.path.join(self.eval_dir, self.config["paths"]["artifacts_subdir"], run_id)
+        # The evaluation harness mirrors Stage 2 artifacts into its own subtree
+        # (workspace_root/evaluation_runs/eval_<ts>/artifacts/run_<id>/).  Use
+        # get_eval_dir so the path is computed consistently with the rest of the
+        # workspace_storage tree.
+        target_artifact_dir = os.path.join(get_eval_dir(bench_dir, self.config, self.eval_id), self.config["paths"]["artifacts_subdir"], run_id)
         os.makedirs(target_artifact_dir, exist_ok=True)
 
         # Enforce that Semgrep outputs to the directory where TriageOrchestrator looks
@@ -173,8 +168,11 @@ class PipelineEvaluator:
         Returns:
             The parsed JSON content from the generated stage 2 triage report.
         """
-        artifacts_subdir = self.config["paths"]["artifacts_subdir"]
-        artifacts_path = os.path.join(self.eval_dir, artifacts_subdir)
+        # The evaluation harness mirrors Stage 2 artifacts into its own subtree
+        # (workspace_root/evaluation_runs/eval_<ts>/artifacts/run_<id>/).  Look
+        # there so we pick up the triage report that _execute_orchestration_run
+        # told TriageOrchestrator to write.
+        artifacts_path = os.path.join(self.eval_dir, self.config["paths"]["artifacts_subdir"])
 
         if not os.path.exists(artifacts_path):
             raise FileNotFoundError(f"Orchestrator artifact root missing from evaluation runtime: {artifacts_path}")
@@ -358,12 +356,11 @@ class PipelineEvaluator:
                 # Resolve the configuration paths directly from config file definitions
                 ws_root = self.config["paths"].get("workspace_root", ".")
                 if not os.path.isabs(ws_root):
-                    # Fall back relative to the active master configuration directory layout
                     config_dir = os.path.dirname(self._config_path)
                     ws_root = os.path.abspath(os.path.join(config_dir, ws_root))
 
                 # Build production destination: workspace_storage_e2e/artifacts/<run_id>/
-                prod_artifact_dir = os.path.join(ws_root, self.config["paths"]["artifacts_subdir"], run_id)
+                prod_artifact_dir = get_artifact_dir(ws_root, self.config, run_id)
                 eval_artifact_dir = os.path.join(self.eval_dir, self.config["paths"]["artifacts_subdir"], run_id)
 
                 if os.path.exists(eval_artifact_dir):

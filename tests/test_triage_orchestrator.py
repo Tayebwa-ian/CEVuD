@@ -43,10 +43,10 @@ def temp_workspace():
             artifacts_dir = os.path.join(temp_dir, "artifacts", "run_test")
             os.makedirs(artifacts_dir, exist_ok=True)
         
-        # Create a sample source file
-        source_file = os.path.join(temp_dir, "test_file.py")
-        with open(source_file, "w") as f:
-            f.write('''
+            # Create a sample source file
+            source_file = os.path.join(temp_dir, "test_file.py")
+            with open(source_file, "w") as f:
+                f.write('''
 def vulnerable_function():
     import os
     os.system("rm -rf /")  # Security issue
@@ -55,47 +55,47 @@ def vulnerable_function():
 def safe_function():
     return "world"
 ''')
-        
-        # Create semgrep output with findings
-        semgrep_output = os.path.join(temp_dir, "semgrep_results.json")
-        semgrep_data = {
-            "results": [
-                {
-                    "path": "test_file.py",
-                    "start": {"line": 2},
-                    "end": {"line": 5},
-                    "extra": {
-                        "severity": "ERROR",
-                        "message": "Command injection vulnerability"
+            
+            # Create semgrep output with findings
+            semgrep_output = os.path.join(temp_dir, "semgrep_results.json")
+            semgrep_data = {
+                "results": [
+                    {
+                        "path": "test_file.py",
+                        "start": {"line": 2},
+                        "end": {"line": 5},
+                        "extra": {
+                            "severity": "ERROR",
+                            "message": "Command injection vulnerability"
+                        }
+                    },
+                    {
+                        "path": "test_file.py",
+                        "start": {"line": 7},
+                        "end": {"line": 9},
+                        "extra": {
+                            "severity": "WARNING",
+                            "message": "Function does nothing"
+                        }
                     }
-                },
-                {
-                    "path": "test_file.py",
-                    "start": {"line": 7},
-                    "end": {"line": 9},
-                    "extra": {
-                        "severity": "WARNING",
-                        "message": "Function does nothing"
-                    }
-                }
-            ]
-        }
-        
-        with open(semgrep_output, "w") as f:
-            json.dump(semgrep_data, f)
-        
-        # Create config file
-        config_path = os.path.join(temp_dir, "config.json")
-        with open(config_path, "w") as f:
-            json.dump(TEST_CONFIG, f)
-        
-        yield {
-            "workspace": temp_dir,
-            "config_path": config_path,
-            "semgrep_path": semgrep_output,
-            "source_file": source_file,
-            "artifacts_dir": artifacts_dir
-        }
+                ]
+            }
+            
+            with open(semgrep_output, "w") as f:
+                json.dump(semgrep_data, f)
+            
+            # Create config file
+            config_path = os.path.join(temp_dir, "config.json")
+            with open(config_path, "w") as f:
+                json.dump(TEST_CONFIG, f)
+            
+            yield {
+                "workspace": temp_dir,
+                "config_path": config_path,
+                "semgrep_path": semgrep_output,
+                "source_file": source_file,
+                "artifacts_dir": artifacts_dir
+            }
     finally:
         if saved_run_id is None:
             os.environ.pop("CEVUD_RUN_ID", None)

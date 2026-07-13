@@ -62,6 +62,28 @@ so train/inference context is identical.
 the existing real-world samples. If a model cannot learn from the capped dataset,
 increase the caps (more projects or more samples per class), not synthetic data.
 
+## 📁 Workspace Storage Layout
+
+`workspace_storage/` is the single on-disk tree for all runtime artifacts. Its
+layout is defined **once** in `config.json → paths` and materialized by the
+helpers in `src/run_context.py`. No Python module or CI workflow hardcodes a
+`workspace_storage/...` path directly.
+
+| Directory (relative to `workspace_root`) | Config key | Used for |
+|---|---|---|
+| `artifacts/<run_id>/` | `artifacts_subdir` | Stage 2 triage ledger, Stage 3 remediation dossier, Semgrep JSON per run |
+| `evaluation_runs/<eval_id>/` | `evaluations_subdir` | Comparative evaluation outputs (reports, plots, caches) |
+| `codebase_vectors/` | `vector_db_dir` | Local SQLite RAG vector store |
+| `model_cache/` | `model_cache_dir` | HuggingFace model weights cache |
+
+**AI Rule**: If you need to compute any of these paths, import the matching
+helper from `src/run_context.py` (`get_artifact_dir`, `get_vector_db_dir`,
+`get_model_cache_dir`, `get_eval_dir`, `get_semgrep_output_path`,
+`get_triage_report_path`, `get_remediation_dossier_path`). Never concatenate
+`workspace_storage` manually.
+
+---
+
 ## ⚖️ Configuration Contract
 All core thresholds are stored in `config.json`. 
 - `weight_static` + `weight_slm` MUST equal 1.0.

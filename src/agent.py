@@ -9,7 +9,7 @@ from deepagents import create_deep_agent
 from llm_factory import LLMFactory
 from vector_store import LocalVectorStore
 from model_manager import ModelManager  # ✅ Centralized model access
-from run_context import resolve_run_id
+from run_context import resolve_run_id, get_artifact_dir, get_vector_db_dir, get_triage_report_path, get_remediation_dossier_path
 
 
 class DeepAppSecAgent:
@@ -60,15 +60,11 @@ class DeepAppSecAgent:
         self.run_id = resolve_run_id(self.workspace_path, ws_root)
         self.config_path = config_path
 
-        # Resolve workspace_root path configurations dynamically
-        ws_root_cfg = self.config["paths"]["workspace_root"]
-        if os.path.isabs(ws_root_cfg):
-            effective_ws_root = ws_root_cfg
-        else:
-            effective_ws_root = os.path.join(self.workspace_path, ws_root_cfg)
-
-        # Establish deterministic artifact delivery coordinates
-        self.artifact_dir = os.path.join(effective_ws_root, self.config["paths"]["artifacts_subdir"], self.run_id)
+        # Establish deterministic artifact delivery coordinates via the same
+        # run_context helpers used by TriageOrchestrator.  This is the single
+        # source of truth for the workspace_storage tree.
+        self.artifact_dir = get_artifact_dir(self.workspace_path, self.config, self.run_id)
+        self.vector_db_dir = get_vector_db_dir(self.workspace_path, self.config)
         os.makedirs(self.artifact_dir, exist_ok=True)
 
         # ✅ Use singleton ModelManager for embeddings — no duplicate loads
@@ -195,7 +191,7 @@ class DeepAppSecAgent:
         Reads the triage gate results and, if escalated, invokes the DeepAgent
         to produce a detailed remediation dossier.
         """
-        triage_file = os.path.join(self.artifact_dir, self.config["paths"]["triage_report"])
+        triage_file = get_triage_report_path(self.workspace_path, self.config, self.run_id)
 
         if not os.path.exists(triage_file):
             # Self-heal: Stage 2 (triage_orchestrator) may not have run yet
@@ -210,7 +206,7 @@ class DeepAppSecAgent:
                     "  Stage 1: produce Semgrep results (semgrep_results.json)\n"
                     "  Stage 2: python src/triage_orchestrator.py --workspace <dir> --config <cfg>\n"
                     "then Stage 3. Expected path: "
-                    f"{os.path.join(self.artifact_dir, self.config['paths']['triage_report'])}"
+                    f"{get_triage_report_path(self.workspace_path, self.config, self.run_id)}"
                 )
 
         with open(triage_file, "r") as f:
@@ -339,7 +335,7 @@ class DeepAppSecAgent:
             print(f"[!] DeepAgent invocation failed: {str(e)}")
 
         # Save the structured remediation portfolio down to persistent file disk mounts
-        report_path = os.path.join(self.artifact_dir, "remediation_dossier.md")
+        report_path = get_remediation_dossier_path(self.workspace_path, self.config, self.run_id)
         try:
             with open(report_path, "w", encoding="utf-8") as out:
                 out.write(final_dossier)

@@ -82,6 +82,7 @@ from data_quality import (  # noqa: E402
 )
 from benchmark_manifest import load_manifest  # noqa: E402
 from repo_provider import clone_repo  # noqa: E402
+from run_context import get_eval_dir  # noqa: E402
 
 
 # Buckets for the changed_line_ratio histogram. Each bucket is [lo, hi).
@@ -289,7 +290,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--manifest", required=True, help="Path to benchmark_manifest_cvefixes.json")
     p.add_argument("--output", default=None,
                     help="Where to write the JSON report (default: "
+                         "<config paths.evaluations_subdir>/safe_counterpart_diagnosis.json "
+                         "if --config is supplied, otherwise "
                          "workspace_storage/evaluation_runs/safe_counterpart_diagnosis.json)")
+    p.add_argument("--config", default=None,
+                    help="Path to config.json. When supplied, the default --output "
+                         "is resolved via run_context.get_eval_dir so it lands in "
+                         "the canonical evaluation subtree.")
     p.add_argument("--clone-subset", type=int, default=None,
                     help="Also measure fix-commit breadth by cloning the first N "
                          "git-source projects (network-heavy; off by default).")
@@ -301,9 +308,18 @@ if __name__ == "__main__":
     report = diagnose(args.manifest, clone_subset=args.clone_subset)
     _print_summary(report)
 
-    out = args.output or os.path.join(
-        "workspace_storage", "evaluation_runs", "safe_counterpart_diagnosis.json"
-    )
+    out = args.output
+    if not out and args.config:
+        try:
+            with open(args.config, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            out = os.path.join(get_eval_dir(".", cfg, "eval_diagnose"), "safe_counterpart_diagnosis.json")
+        except Exception:
+            out = None
+    if not out:
+        out = os.path.join(
+            "workspace_storage", "evaluation_runs", "safe_counterpart_diagnosis.json"
+        )
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)

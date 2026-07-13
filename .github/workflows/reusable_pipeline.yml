@@ -56,8 +56,7 @@ jobs:
 
       - name: Initialize Environment Workspace Directories
         run: |
-          mkdir -p workspace_storage/codebase_vectors 
-          mkdir -p "workspace_storage/artifacts/${CEVUD_RUN_ID}"
+          echo "[*] Stage 2/3 will create workspace_storage subdirectories on demand via run_context.py"
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -111,16 +110,6 @@ jobs:
             -v ${{ github.workspace }}:/workspace \
             ${{ steps.image.outputs.image }}:latest \
             python /app/src/agent.py --workspace /workspace --config ${{ inputs.config-path }}
-
-      - name: Move Runtime Outputs to Systematic Artifact Cache Location
-        if: always()
-        run: |
-          RUN_DIR="workspace_storage/artifacts/${CEVUD_RUN_ID}"
-          mkdir -p "$RUN_DIR"
-          [ -f stage1_2_triage.json ] && mv stage1_2_triage.json "$RUN_DIR"/ || true
-          [ -f workspace_storage/artifacts/${CEVUD_RUN_ID}/stage1_2_triage.json ] || ([ -f workspace_storage/stage1_2_triage.json ] && mv workspace_storage/stage1_2_triage.json "$RUN_DIR"/) || true
-          [ -f remediation_dossier.md ] && mv remediation_dossier.md "$RUN_DIR"/ || true
-          [ -f workspace_storage/artifacts/${CEVUD_RUN_ID}/remediation_dossier.md ] || ([ -f workspace_storage/remediation_dossier.md ] && mv workspace_storage/remediation_dossier.md "$RUN_DIR"/) || true
 
       - name: Archive Run-Specific Security Artifact Dossier
         if: always()

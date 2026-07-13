@@ -51,6 +51,29 @@ from the classifier and can be changed independently.
 
 ## Local execution
 
+### Storage layout — single source of truth
+
+All on-disk paths inside `workspace_storage/` are defined in `config.json → paths`
+and computed by the helpers in `src/run_context.py`. The production pipeline
+(Stages 1–3) and the CI workflows all derive paths from the same source, so you
+should never need to hardcode `workspace_storage/...` anywhere.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `paths.workspace_root` | `workspace_storage` | Root of the runtime artifact tree |
+| `paths.artifacts_subdir` | `artifacts` | Per-run Stage 2/3 outputs (`artifacts/<run_id>/`) |
+| `paths.evaluations_subdir` | `evaluation_runs` | Comparative evaluation outputs |
+| `paths.semgrep_output` | `semgrep_results.json` | Semgrep JSON filename (scoped to the run artifact dir) |
+| `paths.triage_report` | `stage1_2_triage.json` | Stage 2 ledger filename |
+| `paths.vector_db_dir` | `codebase_vectors` | SQLite RAG store |
+| `paths.model_cache_dir` | `model_cache` | HuggingFace cache |
+
+`src/run_context.py` exports helpers (`get_artifact_dir`, `get_vector_db_dir`,
+`get_model_cache_dir`, `get_eval_dir`, `get_semgrep_output_path`,
+`get_triage_report_path`, `get_remediation_dossier_path`) that combine these
+keys with the resolved workspace root and run id. Use them instead of manual
+path concatenation.
+
 ### 1. Seed the local vector store
 
 Use benchmark mode to populate the SQLite store with the bundled gold-standard examples:

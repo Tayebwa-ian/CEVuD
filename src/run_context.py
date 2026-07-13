@@ -1,4 +1,5 @@
-"""run_context.py — single source of truth for a pipeline run's identifier.
+"""run_context.py — single source of truth for a pipeline run's identifier
+and for every path inside ``workspace_storage``.
 
 Why this exists
 ---------------
@@ -20,6 +21,12 @@ unique. We now compute a single, stable run id:
 
 The ``GITHUB_RUN_ID`` / ``GITHUB_SHA`` env vars are still honoured as a
 fallback so existing CI that exports them keeps working.
+
+In addition to the run id, this module owns **every** path inside the
+``workspace_storage`` tree. ``config.json → paths`` is the single source of
+truth for the directory names; the helpers below combine those names with the
+resolved workspace root and run id so the rest of the codebase never hardcodes
+``workspace_storage`` again.
 """
 
 from __future__ import annotations
@@ -90,3 +97,67 @@ def resolve_run_id(
         # stages that share this process tree would need the env var instead.
         pass
     return run_id
+
+
+# ---------------------------------------------------------------------------
+# Path helpers — the single source of truth for the workspace_storage tree.
+# Every subdirectory key lives in config.json → paths.  Absolute values are
+# honoured as-is; relative values are resolved against ``workspace_path``.
+# ---------------------------------------------------------------------------
+
+def _resolve_ws_root(workspace_path: str, config: dict) -> str:
+    """Return the absolute workspace storage root."""
+    ws_root = config.get("paths", {}).get("workspace_root", "workspace_storage")
+    if os.path.isabs(ws_root):
+        return ws_root
+    return os.path.abspath(os.path.join(workspace_path, ws_root))
+
+
+def get_artifact_dir(workspace_path: str, config: dict, run_id: str) -> str:
+    """Return ``<workspace_root>/<artifacts_subdir>/<run_id>``."""
+    ws_root = _resolve_ws_root(workspace_path, config)
+    artifacts_subdir = config.get("paths", {}).get("artifacts_subdir", "artifacts")
+    return os.path.join(ws_root, artifacts_subdir, run_id)
+
+
+def get_vector_db_dir(workspace_path: str, config: dict) -> str:
+    """Return the directory used for the local SQLite vector store."""
+    ws_root = _resolve_ws_root(workspace_path, config)
+    vector_db_dir = config.get("paths", {}).get("vector_db_dir", "codebase_vectors")
+    if os.path.isabs(vector_db_dir):
+        return vector_db_dir
+    return os.path.join(ws_root, vector_db_dir)
+
+
+def get_model_cache_dir(workspace_path: str, config: dict) -> str:
+    """Return the HuggingFace model cache directory."""
+    ws_root = _resolve_ws_root(workspace_path, config)
+    model_cache_dir = config.get("paths", {}).get("model_cache_dir", "model_cache")
+    if os.path.isabs(model_cache_dir):
+        return model_cache_dir
+    return os.path.join(ws_root, model_cache_dir)
+
+
+def get_eval_dir(workspace_path: str, config: dict, eval_id: str) -> str:
+    """Return ``<workspace_root>/<evaluations_subdir>/<eval_id>``."""
+    ws_root = _resolve_ws_root(workspace_path, config)
+    evals_subdir = config.get("paths", {}).get("evaluations_subdir", "evaluation_runs")
+    return os.path.join(ws_root, evals_subdir, eval_id)
+
+
+def get_semgrep_output_path(workspace_path: str, config: dict, run_id: str) -> str:
+    """Return the absolute path to the Semgrep JSON output for a specific run."""
+    return os.path.join(get_artifact_dir(workspace_path, config, run_id),
+                        config.get("paths", {}).get("semgrep_output", "semgrep_results.json"))
+
+
+def get_triage_report_path(workspace_path: str, config: dict, run_id: str) -> str:
+    """Return the absolute path to the Stage 2 triage ledger."""
+    return os.path.join(get_artifact_dir(workspace_path, config, run_id),
+                        config.get("paths", {}).get("triage_report", "stage1_2_triage.json"))
+
+
+def get_remediation_dossier_path(workspace_path: str, config: dict, run_id: str) -> str:
+    """Return the absolute path to the Stage 3 remediation dossier."""
+    return os.path.join(get_artifact_dir(workspace_path, config, run_id),
+                        "remediation_dossier.md")

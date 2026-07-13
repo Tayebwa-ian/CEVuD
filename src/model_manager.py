@@ -23,7 +23,7 @@ import os
 import torch
 import json
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModel
-from typing import Tuple, Optional
+from run_context import get_model_cache_dir
 
 class ModelManager:
     """
@@ -76,11 +76,7 @@ class ModelManager:
         try:
             with open(config_path, "r") as f:
                 config = json.load(f)
-            ws_root = config["paths"]["workspace_root"]
-            cache_sub = config["paths"]["model_cache_dir"]
-            if not os.path.isabs(ws_root):
-                ws_root = os.path.join(repo_root, ws_root)
-            self.cache_dir = os.path.abspath(os.path.join(ws_root, cache_sub))
+            self.cache_dir = get_model_cache_dir(repo_root, config)
         except Exception:
             self.cache_dir = os.path.join(repo_root, "workspace_storage", "model_cache")
         os.makedirs(self.cache_dir, exist_ok=True)

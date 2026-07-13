@@ -14,7 +14,7 @@ unit_test_config_manifest.json
 model_cache/
 cvefixes_dataset
 benchmark_manifest*
-workspace_storage_e2e
+workspace_storage*
 .kilo
 .training_cache/*
 .vscode/*
