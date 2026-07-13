@@ -40,12 +40,16 @@ When `freeze_backbone=True` is used for sample-efficient training, only the
 
 The classifier is fine-tuned on **CVEfixes**
 (`hitoshura25/cvefixes`, converted via `src/scripts/convert_cvefixes.py` →
-`benchmark_manifest_cvefixes.json`). Each CVEfixes row contributes a
-naturally **balanced** 1:1 pair:
-
-- **pre-fix** function → `label = 1` (vulnerable), anchored to the parent of
-  the fix commit,
-- **post-fix** function → `label = 0` (safe), pinned to the fix commit.
+`benchmark_manifest_cvefixes.json`), which provides the **vulnerable**
+(`label = 1`) class — the pre-fix function, anchored to the parent of the fix
+commit. The post-fix function is **not** used as the safe class (it is a
+near-duplicate of its vulnerable twin, median token-similarity ≈ 0.94, which
+collapses training to `P = 0.5`). The **safe** (`label = 0`) class is instead
+mined by `src/scripts/mine_benign_functions.py` — same-file *sibling* functions
+of the vulnerable function plus functions from files the fix never touched, each
+passed through a token-similarity guard (>0.75 to any vulnerable function ⇒
+dropped) so no near-duplicate can enter the safe class. See
+`docs/SAFE_COUNTERPARTS.md`.
 
 Function-level context is built by `src/training/dataset_builder.py` using
 `code_context`: the enclosing function (AST-expanded), its module imports, and

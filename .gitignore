@@ -19,3 +19,5 @@ workspace_storage_e2e
 .training_cache/*
 .vscode/*
 vudenc_dataset
+training_data/*
+training_output/*

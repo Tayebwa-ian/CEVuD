@@ -74,6 +74,47 @@ controls (Step 1 of `docs/SAFE_COUNTERPARTS.md`) before training.
 * **Contradiction** (`find_contradictions`): any normalized `text` that appears
   with **both** labels is a hard contradiction and is dropped.
 
+## The near-duplicate contradiction (the *real* root cause) and its fix
+
+The filters above catch text that is **byte-identical** (after normalization)
+with opposite labels. Measurement on the CVEfixes "safe = the post-fix twin"
+design showed the dominant failure is subtler and far more common:
+
+* the post-fix (safe) function is a **near-duplicate** of its vulnerable twin —
+  median token-similarity **≈ 0.94**, with **68%** of pairs >0.90 and **88%**
+  >0.80 similar. The two differ by only 1–2 lines.
+* A classifier told "this is vulnerable" and "this near-identical code is safe"
+  receives contradictory gradients and collapses to `P=0.5` (loss ≈ ln 2,
+  ROC ≈ 0.5) — exactly the observed symptom, even though *no exact
+  contradiction exists* so `find_contradictions` reports zero.
+
+The remedy (implemented across the converter, miner, builder, and trainer;
+authoritative write-up in `docs/SAFE_COUNTERPARTS.md`):
+
+1. **Vulnerable-only converter.** `convert_cvefixes.py` no longer emits the
+   post-fix twin as `label=0` (default). It emits only the pre-fix
+   **vulnerable** function; `fixed_code` is retained on it for the optional
+   contrastive objective / audit. `--emit-fixed-safe` restores the legacy
+   balanced-pair manifest for A/B comparison.
+2. **Mined safe class.** The `label=0` class comes from
+   `src/scripts/mine_benign_functions.py`: same-file **siblings** of the
+   vulnerable function (sharpest hard negatives) plus functions from untouched
+   files, at a moderate `--ratio` (default 5×) of the vulnerable count.
+3. **Token-similarity guards** (new helpers in `src/data_quality.py`:
+   `token_similarity`, `max_token_similarity`, `count_cross_label_near_duplicates`):
+   * the **miner** drops any candidate >0.75 token-similar to a vulnerable
+     function in the project (this is what excludes the post-fix twin);
+   * the **builder** (`dataset_builder.py`) runs a per-project near-duplicate
+     pass after chunking, dropping any safe chunk >0.75 similar to a vulnerable
+     chunk;
+   * the **trainer** pre-flight (`_check_training_data_quality`) now refuses to
+     train when ≥5% of samples are hard *or* near-duplicate (>0.90)
+     contradictions, not just exact ones.
+4. **Hunk-centered positives.** The builder keeps only the chunk(s) that overlap
+   the diff hunk (the changed / vulnerable lines) for a vulnerable sample, so a
+   positive chunk always contains the sink (fixing the "~50% of positive chunks
+   contain no sink" problem). See `docs/SLM_CHUNKING.md`.
+
 ## How to regenerate clean benchmarks
 
 You must regenerate the manifests **and** rebuild the training splits. The old

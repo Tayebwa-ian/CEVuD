@@ -62,6 +62,15 @@ class TrainingConfig:
     chunk_overlap: int = 8
     chunk_min_code_lines: int = 2
 
+    # ── Hunk-centering + near-duplicate guard (safe-counterpart remedy) ──────
+    # ``hunk_centered``: keep only the chunk(s) that overlap the diff hunk (the
+    # changed / vulnerable lines) for a vulnerable sample, so the positive
+    # signal always contains the sink. ``near_dup_threshold``: drop any safe
+    # chunk more than this token-similar to a vulnerable chunk in the same
+    # project (0 or >=1.0 disables). See docs/SAFE_COUNTERPARTS.md.
+    hunk_centered: bool = True
+    near_dup_threshold: float = 0.75
+
     # ── Verified-benign controls (safe-counterpart remedy) ────────────────
     # Path to a manifest produced by ``src/scripts/mine_benign_functions.py``.
     # When set, ``build-dataset`` merges genuine (label=0) functions that were

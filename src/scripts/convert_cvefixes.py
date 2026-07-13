@@ -222,6 +222,7 @@ def convert_cvefixes(
     trivial_filter: bool = True,
     min_code_lines: int = 2,
     dedup: bool = True,
+    emit_fixed_safe: bool = False,
 ) -> None:
     """Converts CVEfixes to a CEVuD benchmark manifest.
 
@@ -236,23 +237,39 @@ def convert_cvefixes(
         noise_filter: When True (default), skip rows whose changed file is a
             docs/test/packaging/version file — these only yield version bumps
             and doc edits as (vuln, safe) pairs, which is pure label noise.
-        trivial_filter: When True (default), skip (vuln, safe) pairs whose
-            only difference is non-semantic (comments, docstrings, version
-            assignments). Such pairs have no learnable vulnerability signal.
+        trivial_filter: When True (default), skip rows whose vulnerable and
+            post-fix snippets differ only in non-semantic ways (comments,
+            docstrings, version assignments). Such a fix carries no learnable
+            vulnerability signal, so the vulnerable sample it would produce is
+            uninformative (and, historically, its post-fix twin was the source
+            of the near-duplicate label noise).
         min_code_lines: Drop a sample whose vulnerable snippet contains fewer
             than this many lines of real code signal (comments/docstrings/
             version assignments do not count). Prevents training on snippets
             that are, e.g., a single ``__version__ = '3.7'`` line.
-        dedup: When True (default), drop a (vuln, safe) pair if its normalized
-            text duplicates an already-emitted sample (redundancy) or collides
-            with the OPPOSITE label (a hard contradiction the classifier cannot
-            learn). Keeps the manifest compact and noise-free.
+        dedup: When True (default), drop a row if the vulnerable (or post-fix)
+            snippet's normalized text duplicates an already-emitted sample
+            (redundancy) or collides with the OPPOSITE label (a hard
+            contradiction). Keeps the manifest compact and noise-free.
+        emit_fixed_safe: When False (default, RECOMMENDED), the converter emits
+            ONLY the pre-fix **vulnerable** function (``label=1``). The post-fix
+            function is *not* emitted as a ``label=0`` sample because it is a
+            near-duplicate of its vulnerable twin (median token-similarity
+            ~0.94), which trains the classifier on contradictory pairs and
+            collapses it to P=0.5 (loss≈ln 2, ROC≈0.5). The genuine safe class
+            is supplied instead by verified-benign / sibling functions mined
+            with ``src/scripts/mine_benign_functions.py`` (see
+            docs/SAFE_COUNTERPARTS.md). The post-fix function is still retained
+            on the vulnerable sample's ``fixed_code`` field for the optional
+            contrastive objective and for auditing. Set True only to reproduce
+            the legacy balanced-pair manifest for an A/B comparison.
     """
     ds = _load_source(dataset_id, local_dir, split)
 
     samples_by_project: Dict[str, List[Dict[str, Any]]] = {}
     project_repo_urls: Dict[str, str] = {}
     total_seen = total_skipped = total_added = 0
+    total_vuln = total_safe = 0
     skipped_noise = skipped_trivial = skipped_short = skipped_no_safe = 0
     skipped_dup = skipped_contradiction = 0
     # normalized source_code -> label, to drop duplicate / contradictory pairs
@@ -420,12 +437,25 @@ def convert_cvefixes(
         vuln_start = int(anchor["pre_start"])
         vuln_end = int(anchor["pre_end"])
         vuln_func = _infer_function_name(code) or "unknown_function"
+        # ``start_line``/``end_line`` are the PRE-image *changed-line* (hunk)
+        # range — i.e. where the vulnerability actually lives. The dataset
+        # builder uses this to CENTER the training chunk on the sink instead of
+        # the function start (see docs/SLM_CHUNKING.md), so the positive signal
+        # always contains the vulnerable statement.
         samples_by_project[project_name].append(
             _make_sample(code, 1, vuln_start, vuln_end, None, vuln_func, "vulnerable")
         )
         total_added += 1
+        total_vuln += 1
 
-        if safe_code:
+        # ── SAFE (post-fix twin) — emitted ONLY when explicitly requested ────
+        # By default we do NOT emit the post-fix function as label=0: it is a
+        # near-duplicate of its vulnerable twin (median token-similarity ~0.94),
+        # so the (vuln, safe) pair is a contradiction the classifier cannot
+        # learn. The genuine safe class comes from mine_benign_functions.py.
+        # The post-fix code is still preserved on the vulnerable sample's
+        # ``fixed_code`` field (for the optional contrastive objective / audit).
+        if emit_fixed_safe and safe_code:
             safe_start = int(anchor["post_start"])
             safe_end = int(anchor["post_end"])
             safe_func = _infer_function_name(safe_code) or "unknown_function"
@@ -433,6 +463,7 @@ def convert_cvefixes(
                 _make_sample(safe_code, 0, safe_start, safe_end, commit_id, safe_func, "fixed")
             )
             total_added += 1
+            total_safe += 1
 
         if limit is not None and total_added >= limit:
             print(f"[*] Reached --limit {limit}. Stopping early.")
@@ -473,10 +504,14 @@ def convert_cvefixes(
     print(f"  Skipped noise : {skipped_noise:,}  (docs/tests/packaging/version files)")
     print(f"  Skipped short : {skipped_short:,}  (< {min_code_lines} code-signal lines)")
     print(f"  Skipped trivial: {skipped_trivial:,}  (vuln==safe up to comments/version)")
-    print(f"  Skipped no-safe: {skipped_no_safe:,}  (no post-fix code -> no balanced pair)")
+    print(f"  Skipped no-safe: {skipped_no_safe:,}  (no post-fix code -> cannot audit the fix)")
     print(f"  Skipped dup   : {skipped_dup:,}  (duplicate pairs)")
     print(f"  Skipped contra: {skipped_contradiction:,}  (identical text, both labels)")
-    print(f"  Samples added : {total_added:,}")
+    print(f"  Samples added : {total_added:,}  ({total_vuln:,} vulnerable, {total_safe:,} fixed-safe)")
+    if not emit_fixed_safe:
+        print(f"  Safe class    : NOT emitted from post-fix twins (near-duplicates).")
+        print(f"                  Mine it with src/scripts/mine_benign_functions.py")
+        print(f"                  (see docs/SAFE_COUNTERPARTS.md).")
     print(f"  Projects      : {len(manifest):,}")
     print(f"  Output        : {output_path}")
     print(f"{'─'*60}\n")
@@ -578,6 +613,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "pairs and hard label contradictions)."
         ),
     )
+    p.add_argument(
+        "--emit-fixed-safe",
+        dest="emit_fixed_safe",
+        action="store_true",
+        default=False,
+        help=(
+            "Legacy A/B mode: ALSO emit the post-fix function as a label=0 "
+            "'safe' sample (the near-duplicate twin design). Off by default — "
+            "the safe class should be mined with mine_benign_functions.py "
+            "instead (see docs/SAFE_COUNTERPARTS.md)."
+        ),
+    )
     return p
 
 
@@ -592,4 +639,6 @@ if __name__ == "__main__":
         noise_filter=args.noise_filter,
         trivial_filter=args.trivial_filter,
         min_code_lines=args.min_code_lines,
+        dedup=args.dedup,
+        emit_fixed_safe=args.emit_fixed_safe,
     )

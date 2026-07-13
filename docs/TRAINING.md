@@ -493,9 +493,13 @@ leakage and providing a realistic generalization measurement.
 
 ### Balanced coverage
 
-The CVEFixes manifest is naturally balanced (1:1 vulnerable/safe). The greedy
-project selection ensures broad CWE coverage even with small `--max-projects`
-values.
+CVEfixes supplies the **vulnerable** class only; the **safe** class is mined by
+`src/scripts/mine_benign_functions.py` (same-file siblings + untouched-file
+functions, similarity-guarded so no near-duplicate twin leaks in) at a moderate
+`--ratio` (default 5×). The class imbalance that results is handled by the
+trainer's inverse-frequency class weights — a balanced 1:1 corpus is neither
+produced nor required. The greedy project selection still ensures broad CWE
+coverage even with small `--max-projects` values.
 
 ## Reproducibility
 

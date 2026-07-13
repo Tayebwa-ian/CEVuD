@@ -245,3 +245,119 @@ def find_contradictions(records: Iterable[Tuple[str, int]]) -> List[str]:
             seen.add(c)
             unique.append(c)
     return unique
+
+
+# ---------------------------------------------------------------------------
+# 5. Token-level near-duplicate detection (the safe-counterpart guard)
+# ---------------------------------------------------------------------------
+# The contradiction scan above only catches *byte-identical* (normalized) text
+# with opposite labels. The dominant failure mode of the CVEfixes "safe = the
+# post-fix twin" design is subtler: the safe function is 1–2 lines different
+# from its vulnerable twin — near-identical text with opposite labels. A
+# classifier collapses to P=0.5 on such pairs exactly as it does on exact
+# contradictions. The helpers below quantify that *near*-duplication with a
+# cheap token-based similarity so the miner / builder / trainer can drop a
+# candidate safe sample that is too similar to any vulnerable sample. See
+# docs/SAFE_COUNTERPARTS.md and docs/DATA_QUALITY.md.
+
+# Identifiers/keywords OR single non-space punctuation tokens. Operating on
+# tokens (not raw characters) makes the ratio robust to whitespace/formatting
+# and reflects real code-structure overlap.
+_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+|[^\s\w]")
+
+
+def tokenize_code(text: str) -> List[str]:
+    """Tokenize ``text`` into identifiers, numbers, and punctuation tokens.
+
+    Comments and blank lines are ignored so the similarity reflects executable
+    structure rather than documentation. Used by :func:`token_similarity`.
+    """
+    out: List[str] = []
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if not s or _COMMENT_RE.match(s):
+            continue
+        out.extend(_TOKEN_RE.findall(s))
+    return out
+
+
+def _sim_from_tokens(ta: List[str], tb: List[str], floor: float = 0.0) -> float:
+    """SequenceMatcher token ratio with cheap upper-bound short-circuits.
+
+    ``floor`` lets callers skip the expensive ``ratio()`` when even the cheap
+    length/quick bounds already fall at or below the best score seen so far.
+    """
+    la, lb = len(ta), len(tb)
+    if la == 0 or lb == 0:
+        return 0.0
+    # ratio() <= 2*min/(la+lb); bail early when it cannot beat the floor.
+    if (2.0 * min(la, lb)) / (la + lb) <= floor:
+        return 0.0
+    sm = difflib.SequenceMatcher(None, ta, tb)
+    if sm.real_quick_ratio() <= floor:
+        return 0.0
+    if sm.quick_ratio() <= floor:
+        return 0.0
+    return sm.ratio()
+
+
+def token_similarity(a: str, b: str) -> float:
+    """Return the token-level similarity ratio of two code snippets in [0, 1].
+
+    1.0 means the two snippets tokenize identically; ~0.94 is the median
+    vuln↔safe similarity measured on the broken CVEfixes twins. Values above
+    ~0.75 indicate the two snippets differ by only a handful of tokens — the
+    near-duplicate contradiction we must keep out of the (vuln, safe) split.
+    """
+    return _sim_from_tokens(tokenize_code(a), tokenize_code(b))
+
+
+def max_token_similarity(text: str, ref_token_lists: Iterable[List[str]]) -> float:
+    """Highest token similarity between ``text`` and any pre-tokenized snippet
+    in ``ref_token_lists`` (see :func:`tokenize_code`).
+
+    Pre-tokenizing the reference set once (the vulnerable snippets) makes the
+    guard practical to run for every candidate safe sample.
+    """
+    tt = tokenize_code(text)
+    if not tt:
+        return 0.0
+    best = 0.0
+    for rt in ref_token_lists:
+        r = _sim_from_tokens(tt, rt, floor=best)
+        if r > best:
+            best = r
+            if best >= 1.0:
+                break
+    return best
+
+
+def count_cross_label_near_duplicates(
+    records: Iterable[Tuple[str, int]], threshold: float = 0.90
+) -> int:
+    """Count ``label=0`` texts that are >``threshold`` token-similar to some
+    ``label=1`` text (near-duplicate contradictions across the class boundary).
+
+    This is the *near*-duplicate complement of :func:`find_contradictions`
+    (which only finds byte-identical opposite-label text). Used by the trainer's
+    pre-flight guard to refuse a dataset whose safe class is just lightly-edited
+    copies of the vulnerable class. To stay tractable on large splits the
+    vulnerable side is pre-tokenized once and the length short-circuits in
+    :func:`_sim_from_tokens` skip the O(n·m) worst case for most pairs.
+    """
+    vuln_tokens: List[List[str]] = []
+    safe_texts: List[str] = []
+    for text, label in records:
+        if label == 1:
+            toks = tokenize_code(text)
+            if toks:
+                vuln_tokens.append(toks)
+        else:
+            safe_texts.append(text)
+    if not vuln_tokens:
+        return 0
+    count = 0
+    for text in safe_texts:
+        if max_token_similarity(text, vuln_tokens) > threshold:
+            count += 1
+    return count

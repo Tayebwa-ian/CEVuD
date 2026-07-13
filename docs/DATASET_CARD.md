@@ -23,9 +23,16 @@ manifests share the same schema, so the harnesses are interchangeable.
   of the CVEfixes SQLite database linking CVEs to the open-source commits that
   introduced and fixed them.
 - **Language**: Python only (rows are filtered by `language == "python"`).
-- **Construction**: each row yields a **balanced 1:1 pair** — the pre-fix
-  function (`vulnerable_code`) as `label = 1`, the post-fix function
-  (`fixed_code`) as `label = 0`. No synthetic resampling is needed.
+- **Construction (updated)**: each row yields **one** sample — the pre-fix
+  function (`vulnerable_code`) as `label = 1`. The post-fix function is **not**
+  emitted as a `label = 0` sample by default: it is a near-duplicate of its
+  vulnerable twin (median token-similarity ≈ 0.94), which trains the classifier
+  on contradictory pairs and collapses it to `P = 0.5`. The genuine safe class
+  is supplied by verified-benign / sibling functions mined with
+  `src/scripts/mine_benign_functions.py` (see `docs/SAFE_COUNTERPARTS.md`). The
+  post-fix code is retained on the vulnerable sample's `fixed_code` field for the
+  optional contrastive objective / audit. `convert_cvefixes.py --emit-fixed-safe`
+  restores the legacy balanced-pair manifest for A/B studies.
 - **Ground-truth fields per sample**: `repo_url`, fix-commit `commit_id`
   (from the `hash` column), `target_commit`, `cve_id`, `cwe_id` →
   `vulnerability_type`, `cvss_score`, `diff_with_context`, `source_code`,
@@ -120,10 +127,13 @@ rationale and tuning knobs.
 
 * **CVEfixes** (`convert_cvefixes.py`): drops noise files (`docs/`, `tests/`,
   `setup.py`, `package_data`, `conf.py`, `version`, `changelog`, `readme`, …),
-  drops (vuln, safe) pairs whose only difference is comments/docstrings/version
-  assignments, and drops snippets with `< --min-code-lines` (default 2) lines of
-  real code signal. The balanced 1:1 pair design is preserved for rows that
-  remain. Flags: `--no-noise-filter`, `--no-trivial-filter`, `--min-code-lines`.
+  drops rows whose vulnerable/post-fix snippets differ only in
+  comments/docstrings/version assignments, and drops snippets with
+  `< --min-code-lines` (default 2) lines of real code signal. It emits
+  **vulnerable-only** samples by default (the safe class is mined separately —
+  see `docs/SAFE_COUNTERPARTS.md`). Flags: `--no-noise-filter`,
+  `--no-trivial-filter`, `--min-code-lines`, `--emit-fixed-safe` (legacy
+  balanced-pair mode).
 * **VUDENC** (`convert_vudenc.py`): de-duplicates snippets and drops any
   snippet whose normalized text collides with a snippet of the opposite label
   (hard contradiction). Flag: `--no-dedup`, `--min-code-lines`.

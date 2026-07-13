@@ -60,6 +60,25 @@ a genuine safe class.
 > negatives** mined from the same repositories, and (c) **use the post-fix pair
 > as a contrastive signal** rather than as a hard `label=0` target.
 
+> **⚠️ Current default (updated).** After measuring that the post-fix twin is a
+> *near-duplicate* of its vulnerable twin (median token-similarity ≈ 0.94, so
+> 68% of pairs are >0.90 similar), the pipeline **no longer emits the post-fix
+> function as a `label=0` sample at all**. `convert_cvefixes.py` is now
+> **vulnerable-only by default** (`--emit-fixed-safe` restores the legacy
+> balanced-pair manifest for A/B studies), and the genuine safe class is
+> supplied entirely by the mined controls of Step 1. Three guards enforce that
+> the near-duplicate contradiction can never re-enter the data:
+> 1. **Miner similarity guard** — a mined candidate is dropped if it is
+>    >0.75 token-similar to *any* vulnerable function in its project
+>    (this is what excludes the post-fix twin automatically).
+> 2. **Builder near-duplicate guard** — after chunking, any `label=0`
+>    chunk >0.75 similar to a `label=1` chunk in the same project is dropped.
+> 3. **Trainer pre-flight** — refuses to start when ≥5% of training samples
+>    are hard *or* near-duplicate (>0.90) contradictions.
+> The post-fix function is still retained on the vulnerable sample's
+> `fixed_code` field for the optional contrastive objective (Step 2) and for the
+> Step 0 audit.
+
 ---
 
 ## 2. The three-step remedy
@@ -144,15 +163,29 @@ training run that will be reported.
 demonstrably *not* part of any vulnerability fix.
 
 **Method.** For every fix commit in the CVEfixes manifest, check out that commit
-in the real repository and take functions from the files the commit did **NOT**
-modify. By construction, a function in an *unmodified* file was untouched by
-any security fix, so it is a **strong benign control**
-(`label=0`, `sample_subtype="benign_control"`). We then:
+in the real repository and mine functions to use as safe controls, with two
+refinements that make them *sharp* negatives:
+
+* **Same-file siblings first.** We prefer functions from the files the fix
+  *touched* (excluding the patched function itself, which the similarity guard
+  removes). These siblings share the vulnerable function's imports, APIs, and
+  coding style, so they teach the sharpest "safe vs vulnerable" boundary. They
+  are tagged `sample_subtype="benign_sibling"`. Functions from files the commit
+  did **NOT** modify are mined next (`sample_subtype="benign_control"`); by
+  construction those are untouched by any security fix.
+* **Near-duplicate guard.** Every candidate is compared (token similarity)
+  against *all* vulnerable snippets in the same project and dropped if it exceeds
+  `--similarity-threshold` (default **0.75**). This automatically discards the
+  patched function's post-fix twin and any other lightly-edited copy, so the
+  safe class can never re-introduce the contradiction.
+
+We then:
 
 * apply the usual `code_signal_line_count >= min_code_lines` filter (drop
   comment/version-only fragments),
 * de-duplicate by normalized text (no repeated controls),
-* randomly sample up to `--samples-per-commit` per commit (default 3) and
+* mine up to `--ratio` × (number of vulnerable samples in the project) controls
+  per project (default **5×**), honouring `--samples-per-commit` /
   `--max-per-project` / `--max-total` caps,
 * stamp provenance (`repo_url`, `commit_id`, `target_commit`) on every sample.
 
@@ -165,7 +198,7 @@ manifest, then reuse the manifest.
 python src/scripts/mine_benign_functions.py \
     --manifest benchmark_manifest_cvefixes.json \
     --output benign_controls_manifest.json \
-    --samples-per-commit 3 --max-workers 4
+    --samples-per-commit 8 --ratio 5 --similarity-threshold 0.75 --max-workers 6
 ```
 
 **Residual limitation (state it in the paper).** An unmodified function is
@@ -268,7 +301,8 @@ This makes the whole safe-counterpart methodology **auditable end-to-end**.
 | `sample_subtype` | Meaning | `label` | Produced by |
 |---|---|---|---|
 | `"vulnerable"` | pre-fix function of a CVEfixes pair | 1 | `convert_cvefixes.py` |
-| `"fixed"` | post-fix function (the "safe counterpart" we audit) | 0 | `convert_cvefixes.py` |
+| `"fixed"` | post-fix function (legacy `--emit-fixed-safe` only; OFF by default) | 0 | `convert_cvefixes.py` |
+| `"benign_sibling"` | function from a file the fix touched, but not the patched function (sharp negative) | 0 | `mine_benign_functions.py` |
 | `"benign_control"` | function untouched by any fix commit (verified-benign) | 0 | `mine_benign_functions.py` |
 | `"benign"` | function labeled safe by a corpus's own annotation (VUDENC all-zero lines) | 0 | `convert_vudenc.py` |
 | `None` | legacy manifest (backwards-compatible) | — | — |
@@ -278,13 +312,14 @@ and `dataset_summary.json` now reports a `sample_subtypes` breakdown.
 
 > **Leakage note (important for the paper).** Benign controls are mined from
 > the *same repositories* as the vulnerabilities. They are added as their own
-> projects (`benign::<repo>`), and the split is **by project**, so a benign
-> control and a vulnerable sample from the same repo land in the *same* split —
-> which is **correct and conservative**: it means the model is never tested on
-> a repo it trained on, and any repo-level style signal is shared rather than
-> leaked across splits. (If instead you want strict repo-isolation between
-> vuln and benign, merge them under a single project name; the default keeps
-> them separate for transparency.)
+> projects (`benign::<repo>`), but `assign_splits` **collapses the `benign::`
+> prefix** to the underlying repo name before splitting, so a benign control and
+> a vulnerable sample from the same repo land in the *same* split — which is
+> **correct and conservative**: it means the model is never tested on a repo it
+> trained on, and any repo-level style signal is shared rather than leaked
+> across splits. Every split is therefore both project-disjoint *and* two-class
+> (it cannot end up single-class, which would break ROC/early-stopping). See
+> `_split_key` in `src/training/dataset_builder.py`.
 
 > **Validity threat — same-repo overlap (state it in the paper).** Because
 > benign controls are mined from the *same* CVEfixes repositories as

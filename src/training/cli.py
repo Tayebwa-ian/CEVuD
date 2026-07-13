@@ -59,6 +59,12 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Overlapping lines between consecutive chunks (default 8).")
     bd.add_argument("--chunk-min-code-lines", type=int, default=2,
                     help="Drop chunks with fewer code-signal lines (default 2).")
+    bd.add_argument("--no-hunk-centering", action="store_true",
+                    help="Disable hunk-centering; keep all chunks of a vulnerable "
+                         "function instead of only the one(s) containing the sink.")
+    bd.add_argument("--near-dup-threshold", type=float, default=0.75,
+                    help="Drop safe chunks > this token-similar to a vulnerable "
+                         "chunk in the same project (default 0.75; >=1.0 disables).")
     bd.add_argument("--contrastive", action="store_true",
                     help="Add a supervised-contrastive term (vulnerable vs fixed vs "
                          "benign_control). Experimental; see docs/SAFE_COUNTERPARTS.md.")
@@ -117,6 +123,10 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Overlapping lines between consecutive chunks (default 8).")
     ra.add_argument("--chunk-min-code-lines", type=int, default=2,
                     help="Drop chunks with fewer code-signal lines (default 2).")
+    ra.add_argument("--no-hunk-centering", action="store_true",
+                    help="Disable hunk-centering (keep all chunks of a vulnerable function).")
+    ra.add_argument("--near-dup-threshold", type=float, default=0.75,
+                    help="Drop safe chunks > this token-similar to a vulnerable chunk (default 0.75).")
     ra.add_argument("--benign-manifest", dest="benign_manifest", default=None,
                     help="Path to a benign-control manifest (mine_benign_functions.py).")
     ra.add_argument("--contrastive", action="store_true",
@@ -157,6 +167,8 @@ def cmd_build_dataset(args, cfg: TrainingConfig) -> None:
         chunk_max_lines=args.chunk_max_lines,
         chunk_overlap=args.chunk_overlap,
         chunk_min_code_lines=args.chunk_min_code_lines,
+        hunk_centered=not getattr(args, "no_hunk_centering", False),
+        near_dup_threshold=getattr(args, "near_dup_threshold", 0.75),
         benign_manifest_path=args.benign_manifest or cfg.benign_manifest_path,
     )
 
