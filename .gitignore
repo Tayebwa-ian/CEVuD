@@ -21,3 +21,5 @@ workspace_storage_e2e
 vudenc_dataset
 training_data/*
 training_output/*
+*manifest.json
+

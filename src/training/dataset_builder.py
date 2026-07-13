@@ -364,26 +364,61 @@ def assign_splits(
     # Split by REPO key (benign::X grouped with X), not raw project name, so a
     # repo's vulnerable + mined-safe samples never straddle the split boundary.
     keys = list({_split_key(s.project) for s in enriched})
-    rng.shuffle(keys)
+
+    # Class-presence per repo key (after any upstream filtering). A repo key may
+    # end up "safe-only" if its only vulnerable sample was dropped as low-signal,
+    # in which case a naive random split could yield a single-class split and a
+    # useless (ROC-undefined) eval. We therefore SEED every split with at least
+    # one repo key that still contains a vulnerable sample, then fill the rest
+    # toward the requested train/val/test fractions.
+    has_vuln: set = {_split_key(s.project) for s in enriched if s.label == 1}
+    vuln_keys = [k for k in keys if k in has_vuln]
+    safe_keys = [k for k in keys if k not in has_vuln]
+    rng.shuffle(vuln_keys)
+    rng.shuffle(safe_keys)
 
     n = len(keys)
     n_test = max(1, round(n * test_fraction))
     n_val = max(1, round(n * val_fraction))
     n_test = min(n_test, n - 2)
     n_val = min(n_val, n - n_test - 1)
+    n_train = n - n_test - n_val
+    targets = {"train": n_train, "validation": n_val, "test": n_test}
+    order = ["train", "validation", "test"]
 
-    test_keys = set(keys[:n_test])
-    val_keys = set(keys[n_test:n_test + n_val])
+    assigned: Dict[str, List[str]] = {sp: [] for sp in order}
+    # Seed each split with one vulnerable repo key (guarantees a two-class split
+    # as long as we have >= 3 vulnerable repo keys; true for the full corpus).
+    vuln_iter = iter(vuln_keys)
+    for sp in order:
+        try:
+            assigned[sp].append(next(vuln_iter))
+        except StopIteration:
+            pass  # not enough vulnerable repos; the single-class guard catches this
+    seeded = {k for v in assigned.values() for k in v}
+    remaining_vuln = [k for k in vuln_keys if k not in seeded]
+
+    # Fill each split toward its target, always topping up the split with the
+    # most remaining capacity so the requested fractions are approximately kept.
+    remaining = {sp: targets[sp] - len(assigned[sp]) for sp in order}
+    pool = remaining_vuln + safe_keys
+    rng.shuffle(pool)
+    for k in pool:
+        best = max(
+            (sp for sp in order if remaining[sp] > 0),
+            key=lambda sp: (remaining[sp], -order.index(sp)),
+            default="train",
+        )
+        assigned[best].append(k)
+        remaining[best] -= 1
 
     assignment: Dict[str, str] = {}
     for s in enriched:
         k = _split_key(s.project)
-        if k in test_keys:
-            assignment[s.sample_id] = "test"
-        elif k in val_keys:
-            assignment[s.sample_id] = "validation"
-        else:
-            assignment[s.sample_id] = "train"
+        for sp, ks in assigned.items():
+            if k in ks:
+                assignment[s.sample_id] = sp
+                break
     return assignment
 
 
@@ -731,6 +766,28 @@ def build_dataset(
     for s in enriched:
         split_name = assignment[s.sample_id]
         splits[split_name].append(s)
+
+    # ── Single-class split guard ─────────────────────────────────────────────
+    # A split with only one class makes ROC/PR undefined and lets the model
+    # "win" by always predicting the majority — a silent, useless eval. Fail
+    # loudly instead of producing a degenerate dataset. This happens if
+    # ``benign::<repo>`` and ``<repo>`` were split apart (fixed by ``_split_key``
+    # + the stratified seeding in assign_splits), OR if every vulnerable sample
+    # in a split's repos was dropped upstream (e.g. low-signal filter). Either
+    # way a single-class split must not be trained/evaluated on.
+    for split_name, samples in splits.items():
+        labels = {s.label for s in samples}
+        if len(labels) < 2:
+            present = "safe" if 0 in labels else "vulnerable"
+            raise ValueError(
+                f"Split '{split_name}' contains ONLY {present} samples "
+                f"({len(samples)} total). Every split must be two-class for a "
+                f"meaningful ROC/PR. This means either benign::<repo> and <repo> "
+                f"were split apart (ensure assign_splits collapses the 'benign::' "
+                f"prefix), or all vulnerable samples in this split's repos were "
+                f"filtered out upstream (reduce low-signal dropping or add more "
+                f"vulnerable repos)."
+            )
 
     for split_name, samples in splits.items():
         path = os.path.join(output_dir, f"{split_name}.jsonl")

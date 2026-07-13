@@ -93,7 +93,14 @@ def _run_git(args, cwd=None, retries=3, timeout=300, on_retry=None) -> subproces
     )
 
 
-def clone_repo(git_url: str, ref: str = None, dest_dir: str = None, shallow: bool = True) -> str:
+def clone_repo(
+    git_url: str,
+    ref: str = None,
+    dest_dir: str = None,
+    shallow: bool = True,
+    no_checkout: bool = False,
+    blob_filter: str = "blob:none",
+) -> str:
     """Clones `git_url` into `dest_dir` (or a fresh temp dir if None), and
     checks out `ref` if given.
 
@@ -106,6 +113,16 @@ def clone_repo(git_url: str, ref: str = None, dest_dir: str = None, shallow: boo
             (--depth 1) clone for speed. Shallow clones are skipped when a
             specific ref is requested, since `git checkout <sha>` requires
             that commit's history to be present.
+        no_checkout: When True, pass ``--no-checkout`` so the working tree is
+            NOT materialised. Use this when you only need to read objects via
+            ``git show <commit>:<path>`` (e.g. benign mining) — it avoids
+            downloading every blob of the default branch and is dramatically
+            faster for history-heavy repos.
+        blob_filter: ``--filter`` spec for partial clones. The default
+            ``blob:none`` skips blobs (fetched on demand). ``tree:0`` additionally
+            skips trees (only commits are fetched up front); combine with
+            ``no_checkout`` for the lightest possible clone when callers read
+            via ``git show``.
 
     Returns:
         str: Path to the cloned repository root.
@@ -131,7 +148,10 @@ def clone_repo(git_url: str, ref: str = None, dest_dir: str = None, shallow: boo
         # <sha>^` reach arbitrary historical commits) but blobs are
         # fetched on demand. This is what CVEfixes needs without
         # downloading the entire working tree up front.
-        clone_args += ["--filter", "blob:none"]
+        clone_args += ["--filter", blob_filter]
+    if no_checkout:
+        # Skip materialising the working tree; callers read via `git show`.
+        clone_args += ["--no-checkout"]
     clone_args += [git_url, dest_dir]
 
     print(f"[*] Cloning {git_url} into {dest_dir} ...")
