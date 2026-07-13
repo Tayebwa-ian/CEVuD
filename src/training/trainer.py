@@ -90,26 +90,82 @@ class VulnerabilityDataset(Dataset):
 
 # ── Metrics ─────────────────────────────────────────────────────────────────
 
+def _describe_el(x) -> str:
+    """Short human-readable description of a predictions element."""
+    if hasattr(x, "shape"):
+        return f"{type(x).__name__}{tuple(x.shape)}"
+    if isinstance(x, (list, tuple)):
+        return f"{type(x).__name__}[{len(x)}]"
+    return type(x).__name__
+
+
+def _extract_logits(preds):
+    """Coerce the Trainer's `eval_pred.predictions` into a single 2D float32
+    array of shape (N, num_labels), no matter how it is packaged.
+
+    Depending on the transformers version and model, `predictions` can be:
+      * a single (N, num_labels) ndarray/tensor,
+      * a per-batch *list* of (b, num_labels) arrays (ragged last batch),
+      * a list whose elements are full model outputs / tuples (logits, ...),
+      * or a 3D tensor (b, seq, num_labels) that must be pooled to (b, num_labels).
+    We defensively unwrap and stack each piece so we never hit the ragged
+    ``expected sequence of length ... at dim 1`` error.
+    """
+    if isinstance(preds, (list, tuple)):
+        pieces = []
+        for a in preds:
+            pieces.append(_extract_logits(a))
+        widths = [p.shape[-1] for p in pieces]
+        if len(set(widths)) > 1:
+            # Defensive: arrivals of mixed widths can mean a per-batch list with
+            # an anomalous element, OR hidden states (width = hidden size) leaked
+            # in alongside the 2-class logits (width = 2). Prefer the smallest
+            # width that matches our binary-classifier contract (2); otherwise
+            # fall back to the most common width, then the widest.
+            if 2 in widths:
+                w = 2
+            else:
+                from collections import Counter as _Counter
+                w = _Counter(widths).most_common(1)[0][0]
+            pieces = [
+                (p[:, :w] if p.shape[-1] >= w
+                 else np.pad(p, ((0, 0), (0, w - p.shape[-1])), mode="constant"))
+                for p in pieces
+            ]
+        return np.concatenate(pieces, axis=0)
+
+    # Tensor or ndarray.
+    if hasattr(preds, "detach"):  # torch.Tensor
+        arr = preds.detach().cpu().numpy()
+    else:
+        arr = np.asarray(preds, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    if arr.ndim == 3:  # (b, seq, c) -> pool over the sequence axis
+        arr = arr.mean(axis=1)
+    return arr.astype(np.float32, copy=False)
+
+
 def compute_metrics(eval_pred) -> Dict[str, Any]:
     logits, labels = eval_pred.predictions, eval_pred.label_ids
+    labels = np.asarray(labels)
 
-    # `predictions` is normally a single 2D array (N, num_labels). When eval
-    # batches differ in size (e.g. the trailing batch) the Trainer returns a
-    # *list* of per-batch arrays instead; collapsing it along the batch axis
-    # into one 2D tensor avoids both the "tensor from list of ndarrays is
-    # extremely slow" warning and the ragged-shape ValueError
-    # (expected sequence of length N at dim 1 ...).
-    if isinstance(logits, (list, tuple)):
-        # Each element may be a per-batch (b, num_labels) array or, in some
-        # transformers versions, a per-example (num_labels,) array. Normalise to
-        # 2D and stack along the batch axis (requires a constant num_labels).
-        logits = np.concatenate(
-            [np.atleast_2d(np.asarray(a, dtype=np.float32)) for a in logits], axis=0
-        )
-    elif hasattr(logits, "detach"):  # torch.Tensor
-        logits = logits.detach().cpu().numpy()
-    logits = np.asarray(logits, dtype=np.float32)
+    # One-time diagnostic: reveal exactly what the Trainer handed us, so a
+    # packaging mismatch (e.g. a ragged/extra output) is visible instead of a
+    # cryptic crash.
+    if not getattr(compute_metrics, "_logged_shape", False):
+        compute_metrics._logged_shape = True
+        try:
+            _t = type(logits).__name__
+            if isinstance(logits, (list, tuple)):
+                _info = [_describe_el(x) for x in logits[:3]]
+            else:
+                _info = _describe_el(logits)
+            print(f"[metrics] predictions type={_t} sample={_info}")
+        except Exception:
+            pass
 
+    logits = _extract_logits(logits)
     probs = torch.softmax(torch.as_tensor(logits), dim=-1).numpy()
     preds = probs.argmax(axis=-1)
 
