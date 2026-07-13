@@ -34,6 +34,7 @@ from code_context import (
     expand_to_function,
     build_context_snippet,
 )
+from code_chunks import chunk_code, aggregate_chunk_scores
 
 from schema import BenchmarkSample, ProjectManifest, RawScoreRecord, RepoProvenance
 from repo_provider import resolve_project_workspace
@@ -343,7 +344,7 @@ class RawScoreExtractor:
                             f.write(msrc)
                     func_start, func_end = expand_to_function(content, sample.start_line)
                     slm_code = build_context_snippet(
-                        content, (func_start, func_end), imports, cross
+                        content, (func_start, func_end), imports, {}
                     )
                     sev_path = fp.replace("\\", "/")
 
@@ -366,9 +367,42 @@ class RawScoreExtractor:
             shutil.rmtree(scan_root, ignore_errors=True)
 
     def _finalize(self, project, meta, severities, snippets, provenance) -> List[RawScoreRecord]:
-        """Batched SLM inference + RawScoreRecord assembly (shared by both paths)."""
+        """Batched SLM inference + RawScoreRecord assembly (shared by both paths).
+
+        Snippets are chunked into uniform windows (matching training and pipeline
+        inference) before scoring, and per-chunk probabilities are aggregated
+        (default: max) to produce a single score per sample.
+        """
         print(f"[*] Running batched SLM inference on {len(snippets)} samples for '{project.project}' ...")
-        slm_scores = self._get_model_manager().get_classifier_inference(snippets) if snippets else []
+        slm_cfg = self.config.get("slm_inference", {})
+        chunk_max_lines = slm_cfg.get("chunk_max_lines", 64)
+        chunk_overlap = slm_cfg.get("chunk_overlap", 8)
+        min_code_lines = slm_cfg.get("min_code_lines", 2)
+        aggregation = slm_cfg.get("aggregation", "max")
+
+        if snippets:
+            per_snippet_chunks: List[list] = []
+            flat_texts: List[str] = []
+            for snippet in snippets:
+                chunks = chunk_code(snippet or "", chunk_max_lines, chunk_overlap, min_code_lines)
+                per_snippet_chunks.append(chunks)
+                flat_texts.extend(c.text for c in chunks)
+
+            flat_probs = self._get_model_manager().get_classifier_inference(flat_texts) if flat_texts else []
+
+            slm_scores: List[float] = []
+            cursor = 0
+            for chunks in per_snippet_chunks:
+                if not chunks:
+                    slm_scores.append(0.0)
+                    continue
+                probs = flat_probs[cursor:cursor + len(chunks)]
+                cursor += len(chunks)
+                score = aggregate_chunk_scores([float(p) for p in probs], aggregation)
+                slm_scores.append(round(float(score), 4))
+        else:
+            slm_scores = []
+
         records = []
         for sample, severity, slm_score in zip(meta, severities, slm_scores):
             records.append(RawScoreRecord(
@@ -379,7 +413,7 @@ class RawScoreExtractor:
                 label=sample.label,
                 severity=severity,
                 severity_weight=self.severity_map.get(severity, 0.0),
-                slm_score=round(float(slm_score), 4),
+                slm_score=slm_score,
                 vulnerability_type=sample.vulnerability_type,
                 repo_url=sample.repo_url,
                 commit_id=sample.commit_id,

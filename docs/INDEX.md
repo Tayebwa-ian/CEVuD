@@ -29,6 +29,7 @@ the repository root is the high-level navigation hub and links back here.
 | `docs/SLM_CHUNKING.md` | **New.** Research on vulnerability-detection approaches we borrow from, plus the chunked-SLM + cross-context-argumentation design. |
 | `docs/METRICS.md` | **New.** Canonical metric definitions, formulas, and justifications: recall, F1/F2, TRR, Cost reduction (and supporting confusion-matrix / precision / specificity / escalation-rate metrics) for both the model and the pipeline. |
 | `docs/SAFE_COUNTERPARTS.md` | **New.** The "safe counterpart" problem & fix: why the post-fix function is a *noisy/relative* negative, how we measure the contamination, and the three-step remedy (diagnose → verified-benign controls → optional contrastive). Authoritative methodology for the paper. |
+| `docs/EVALUATION.md` | **New.** Comparative evaluation framework: gating weight search, baseline comparisons, linearity check, override ablation, result storage, and how to apply tuned weights in production. |
 | `docs/research_outline.md` | Research write-up / paper outline referencing the classifier and corpora. |
 
 ## Where the code lives (quick reference)
@@ -42,3 +43,4 @@ the repository root is the high-level navigation hub and links back here.
 | Dataset converters | `src/scripts/convert_cvefixes.py`, `src/scripts/convert_vudenc.py` |
 | Shared heuristics | `src/data_quality.py` (noise/trivial/contradiction), `src/code_chunks.py` (chunking) |
 | Evaluation / gate study | `src/evaluation/` (`run_comparative_evaluation.py`, `gate_strategies.py`) |
+| Evaluation tests | `tests/test_evaluation/` (gate strategies, metrics, grid search, dataset splitter, linearity check, raw score extractor) |
