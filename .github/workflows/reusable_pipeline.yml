@@ -95,19 +95,19 @@ jobs:
             -e CLASSIFIER_MODEL="${{ steps.model-id.outputs.model_id }}" \
             ${{ steps.image.outputs.image }}:latest \
             python -c "
-import os, sys
-from huggingface_hub import snapshot_download
-token = os.environ.get('HF_TOKEN') or None
-model_id = os.environ.get('CLASSIFIER_MODEL', '').strip()
-if not model_id:
-    print('[*] No model ID set, skipping.')
-    sys.exit(0)
-try:
-    path = snapshot_download(model_id, token=token)
-    print(f'[+] Model cached at: {path}')
-except Exception as exc:
-    print(f'[!] Model download failed (will try again at runtime): {exc}')
-"
+            import os, sys
+            from huggingface_hub import snapshot_download
+            token = os.environ.get('HF_TOKEN') or None
+            model_id = os.environ.get('CLASSIFIER_MODEL', '').strip()
+            if not model_id:
+                print('[*] No model ID set, skipping.')
+                sys.exit(0)
+            try:
+                path = snapshot_download(model_id, token=token)
+                print(f'[+] Model cached at: {path}')
+            except Exception as exc:
+                print(f'[!] Model download failed (will try again at runtime): {exc}')
+            "
 
       - name: Execute Stage 1 (Static Analysis Engine Capture)
         run: |
