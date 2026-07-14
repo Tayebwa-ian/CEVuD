@@ -178,11 +178,23 @@ def evaluate(
     max_length: int = 512,
     batch_size: int = 8,
     beta: float = 2.0,
+    best_checkpoint_path: str = "",
 ) -> Dict[str, Any]:
     from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForSequenceClassification.from_pretrained(model_path)
+    # Prefer the best checkpoint (by val loss) over the loose ``model/`` dir
+    # so evaluation never silently uses a degenerated final epoch.
+    _candidate = best_checkpoint_path.strip()
+    if not _candidate:
+        _candidate = model_path
+    elif not os.path.exists(_candidate):
+        print(f"[!] Best checkpoint not found at {_candidate}; falling back to {model_path}")
+        _candidate = model_path
+    else:
+        print(f"[*] Evaluating best checkpoint: {_candidate}")
+
+    tokenizer = AutoTokenizer.from_pretrained(_candidate)
+    model = AutoModelForSequenceClassification.from_pretrained(_candidate)
     model.eval()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)

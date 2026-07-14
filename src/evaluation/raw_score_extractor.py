@@ -28,6 +28,11 @@ import subprocess
 import tempfile
 from typing import List, Dict, Any, Optional
 
+import os
+import sys
+# model_manager.py and code_chunks.py live in src/, one level up from src/evaluation/.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
 from code_context import (
     collect_module_imports,
     collect_cross_file_context,
@@ -40,9 +45,6 @@ from schema import BenchmarkSample, ProjectManifest, RawScoreRecord, RepoProvena
 from repo_provider import resolve_project_workspace
 from benchmark_manifest import load_manifest
 
-import sys
-# model_manager.py lives in src/, one level up from src/evaluation/.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from model_manager import ModelManager  # noqa: E402
 
 

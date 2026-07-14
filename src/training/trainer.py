@@ -247,13 +247,55 @@ def _supervised_contrastive_loss(
     return per_anchor[has_pos].mean()
 
 
+class FocalLoss(torch.nn.Module):
+    """Focal Loss for multi-class classification.
+
+    Addresses class imbalance by down-weighting easy examples and focusing
+    training on hard negatives. Standard cross-entropy is recovered when
+    ``gamma=0``.
+
+    Args:
+        gamma: Focusing parameter. Higher values increase the focus on hard
+            examples (default 2.0).
+        alpha: Weight for the vulnerable class (label=1). The safe class
+            weight is ``1 - alpha`` (default 0.25).
+        reduction: Reduction method — ``"mean"`` or ``"sum"``.
+    """
+
+    def __init__(
+        self, gamma: float = 2.0, alpha: float = 0.25, reduction: str = "mean"
+    ) -> None:
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce = torch.nn.functional.cross_entropy(logits, targets, reduction="none")
+        pt = torch.exp(-ce)
+        alpha_t = torch.where(
+            targets == 1,
+            torch.tensor(self.alpha, device=logits.device),
+            torch.tensor(1.0 - self.alpha, device=logits.device),
+        )
+        focal = alpha_t * (1 - pt).pow(self.gamma) * ce
+        if self.reduction == "sum":
+            return focal.sum()
+        return focal.mean()
+
+
 class WeightedTrainer(Trainer):
     """`Trainer` variant that applies per-class weights to the cross-entropy
-    loss and optionally trains only the classifier head (frozen backbone).
+    loss, optionally replaces it with Focal Loss, and optionally trains only
+    the classifier head (frozen backbone).
 
     Vulnerability datasets are typically class-imbalanced; weighting the loss
     prevents the model from collapsing toward the majority class and gives the
     minority (vulnerable) class a stronger gradient signal.
+
+    When ``use_focal_loss=True`` the standard cross-entropy is replaced with
+    ``FocalLoss(gamma, alpha)``, which down-weights easy negatives and forces
+    the model to focus on hard positives. See docs/MODEL_TRAINING.md §Loss.
 
     When ``contrastive=True`` an optional supervised-contrastive term is added
     on top of the cross-entropy loss (weighted by ``contrastive_lambda``), so
@@ -264,7 +306,9 @@ class WeightedTrainer(Trainer):
     def __init__(
         self, *args, class_weights=None, freeze_backbone=False,
         contrastive: bool = False, contrastive_lambda: float = 0.1,
-        contrastive_temperature: float = 0.1, **kwargs
+        contrastive_temperature: float = 0.1,
+        use_focal_loss: bool = False, focal_loss_gamma: float = 2.0,
+        focal_loss_alpha: float = 0.25, **kwargs
     ):
         super().__init__(*args, **kwargs)
         self.class_weights = class_weights
@@ -272,15 +316,20 @@ class WeightedTrainer(Trainer):
         self.contrastive = contrastive
         self.contrastive_lambda = contrastive_lambda
         self.contrastive_temperature = contrastive_temperature
+        self.use_focal_loss = use_focal_loss
+        self.focal_loss_gamma = focal_loss_gamma
+        self.focal_loss_alpha = focal_loss_alpha
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels = inputs.pop("labels")
-        # Request hidden states once (needed by the optional contrastive
-        # term) — costs nothing when contrastive is disabled, and avoids
-        # a second forward pass.
         outputs = model(**inputs, output_hidden_states=True)
         logits = outputs.logits
-        if self.class_weights is not None:
+        if self.use_focal_loss:
+            loss_fct = FocalLoss(
+                gamma=self.focal_loss_gamma,
+                alpha=self.focal_loss_alpha,
+            )
+        elif self.class_weights is not None:
             w = self.class_weights.to(logits.device)
             loss_fct = torch.nn.CrossEntropyLoss(weight=w)
         else:
@@ -316,7 +365,9 @@ def _compute_class_weights(labels, num_labels: int) -> torch.Tensor:
     return torch.tensor(weights, dtype=torch.float)
 
 
-def _check_training_data_quality(train_ds: "VulnerabilityDataset", allow_noisy: bool) -> None:
+def _check_training_data_quality(
+    train_ds: "VulnerabilityDataset", allow_noisy: bool, near_dup_threshold: float = 0.75
+) -> None:
     """Pre-flight guard: refuse data that cannot be learned.
 
     Two failure modes are checked, both of which pin the loss at ``ln(2)`` and
@@ -325,12 +376,12 @@ def _check_training_data_quality(train_ds: "VulnerabilityDataset", allow_noisy: 
     1. **Hard contradictions** — a normalized text that appears with BOTH
        labels (identical input, opposite ground truth).
     2. **Near-duplicate contradictions** — a ``safe`` sample that is
-       >90% token-similar to a ``vulnerable`` sample. This is the dominant
-       failure of the old "safe = the post-fix twin" design (median twin
-       similarity ~0.94): the text is not byte-identical, so (1) misses it, but
-       it is close enough that the classifier still collapses. Catching it here
-       is what makes the guard meaningful for the safe-counterpart methodology
-       (see docs/SAFE_COUNTERPARTS.md).
+       >``near_dup_threshold`` token-similar to a ``vulnerable`` sample. This
+       is the dominant failure of the old "safe = the post-fix twin" design
+       (median twin similarity ~0.94): the text is not byte-identical, so (1)
+       misses it, but it is close enough that the classifier still collapses.
+       Catching it here is what makes the guard meaningful for the
+       safe-counterpart methodology (see docs/SAFE_COUNTERPARTS.md).
 
     Refuse by default when either signal exceeds 5% of the training set; pass
     ``allow_noisy`` to override (e.g. when debugging the filters)."""
@@ -338,7 +389,7 @@ def _check_training_data_quality(train_ds: "VulnerabilityDataset", allow_noisy: 
     contradictions = find_contradictions(zip(train_ds.texts, train_ds.labels))
     n = len(contradictions)
     n_near = count_cross_label_near_duplicates(
-        zip(train_ds.texts, train_ds.labels), threshold=0.90
+        zip(train_ds.texts, train_ds.labels), threshold=near_dup_threshold
     )
     frac = (n / total) if total else 0.0
     frac_near = (n_near / total) if total else 0.0
@@ -418,7 +469,7 @@ def train(cfg: TrainingConfig) -> Dict[str, Any]:
     val_ds = VulnerabilityDataset(cfg.val_path, tokenizer, cfg.max_length)
 
     # Data-quality pre-flight: refuse to waste a run on contradictory data.
-    _check_training_data_quality(train_ds, cfg.allow_noisy_data)
+    _check_training_data_quality(train_ds, cfg.allow_noisy_data, cfg.near_dup_threshold)
 
     # Per-class weights from the training distribution to counter imbalance.
     class_weights = _compute_class_weights(train_ds.labels, cfg.num_labels)
@@ -477,6 +528,9 @@ def train(cfg: TrainingConfig) -> Dict[str, Any]:
         contrastive=cfg.contrastive,
         contrastive_lambda=cfg.contrastive_lambda,
         contrastive_temperature=cfg.contrastive_temperature,
+        use_focal_loss=cfg.use_focal_loss,
+        focal_loss_gamma=cfg.focal_loss_gamma,
+        focal_loss_alpha=cfg.focal_loss_alpha,
         callbacks=[
             EarlyStoppingCallback(
                 early_stopping_patience=cfg.early_stopping_patience,

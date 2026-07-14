@@ -78,6 +78,12 @@
       "enabled": false,
       "lambda": 0.1,
       "temperature": 0.1
+    },
+    "focal_loss": {
+      "_comment": "Class-imbalance remedy. When enabled, replaces standard cross-entropy with Focal Loss, down-weighting easy negatives and focusing on hard positives. See docs/MODEL_TRAINING.md §Loss.",
+      "enabled": false,
+      "gamma": 2.0,
+      "alpha": 0.25
     }
   }
 }
