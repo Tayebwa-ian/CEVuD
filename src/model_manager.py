@@ -22,6 +22,7 @@ Usage:
 import os
 import torch
 import json
+from typing import Tuple, List
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModel
 from run_context import get_model_cache_dir
 
