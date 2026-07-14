@@ -141,13 +141,18 @@ class ModelManager:
             self._embedding_model.to("cpu")
         return self._embedding_tokenizer, self._embedding_model
 
-    def get_classifier_inference(self, code_snippets: list) -> list:
+    def get_classifier_inference(self, code_snippets: list, batch_size: int = 64) -> list:
         """
         Performs batched inference on a list of code snippets using the classifier.
         This is the optimized, high-speed version for Stage 2 triage.
 
+        Large inputs are split into ``batch_size``-sized sub-batches so a single
+        forward pass never exhausts GPU/CPU memory. Scores are concatenated in
+        the original order.
+
         Args:
             code_snippets (list of str): List of clean function source code strings.
+            batch_size (int): Maximum snippets per forward pass. Defaults to 64.
 
         Returns:
             list of float: List of risk probabilities (0.0 to 1.0) for each snippet.
@@ -161,61 +166,51 @@ class ModelManager:
         if self._scoring_mode is None:
             self._configure_scoring(model)
 
-        inputs = tokenizer(
-            code_snippets,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-            padding=True
-        )
+        all_probs: list = []
+        for start in range(0, len(code_snippets), batch_size):
+            batch = code_snippets[start:start + batch_size]
+            inputs = tokenizer(
+                batch,
+                return_tensors="pt",
+                truncation=True,
+                max_length=512,
+                padding=True,
+            )
 
-        with torch.no_grad():
-            outputs = model(**inputs)
-            logits = None
+            with torch.no_grad():
+                outputs = model(**inputs)
+                logits = None
 
-            if hasattr(outputs, "logits") and torch.is_tensor(outputs.logits):
-                logits = outputs.logits
-            else:
-                try:
-                    outputs = model.forward(**inputs)
-                    if hasattr(outputs, "logits") and torch.is_tensor(outputs.logits):
-                        logits = outputs.logits
-                    elif torch.is_tensor(outputs):
-                        logits = outputs
-                except Exception:
-                    pass
+                if hasattr(outputs, "logits") and torch.is_tensor(outputs.logits):
+                    logits = outputs.logits
+                else:
+                    try:
+                        outputs = model.forward(**inputs)
+                        if hasattr(outputs, "logits") and torch.is_tensor(outputs.logits):
+                            logits = outputs.logits
+                        elif torch.is_tensor(outputs):
+                            logits = outputs
+                    except Exception:
+                        pass
 
-            if logits is None and torch.is_tensor(outputs):
-                logits = outputs
+                if logits is None and torch.is_tensor(outputs):
+                    logits = outputs
 
-            if logits is None:
-                raise TypeError("Could not obtain logits from model output")
+                if logits is None:
+                    raise TypeError("Could not obtain logits from model output")
 
-            if self._scoring_mode == "multilabel":
-                # Multi-label head (BCEWithLogitsLoss): each of the 31
-                # classes is an independent sigmoid. In practice the dedicated
-                # "safe" class fires ~1.0 even for vulnerable code, so
-                # 1 - P(safe) alone collapses every score to ~0 and the gate
-                # stops escalating real vulnerabilities. The real vulnerability
-                # signal lives in the per-CWE probabilities, so CEVuD's threat
-                # score is the MAXIMUM over the 30 CWE classes, with
-                # (1 - P(safe)) kept as a floor:
-                #   P_slm = max(1 - P(safe), max_i P(CWE_i))
-                # -> a single [0,1] score that still escalates on a strong
-                # per-CWE hit while respecting an explicit safe verdict.
-                probs = torch.sigmoid(logits)
-                safe = probs[:, self._safe_class_idx]
-                num_labels = probs.shape[1]
-                cwe_idx = [i for i in range(num_labels) if i != self._safe_class_idx]
-                cwe_max = probs[:, cwe_idx].max(dim=1).values
-                vuln = torch.maximum(1.0 - safe, cwe_max)
-                vuln_probs = vuln.tolist()
-            else:
-                # Single-label head (CrossEntropy): softmax over classes, and we
-                # gate on the dedicated security-vulnerability class.
-                probabilities = torch.softmax(logits, dim=1)
-                vuln_probs = probabilities[:, self._vuln_class_idx].tolist()
-            return vuln_probs
+                if self._scoring_mode == "multilabel":
+                    probs = torch.sigmoid(logits)
+                    safe = probs[:, self._safe_class_idx]
+                    num_labels = probs.shape[1]
+                    cwe_idx = [i for i in range(num_labels) if i != self._safe_class_idx]
+                    cwe_max = probs[:, cwe_idx].max(dim=1).values
+                    vuln = torch.maximum(1.0 - safe, cwe_max)
+                    all_probs.extend(vuln.tolist())
+                else:
+                    probabilities = torch.softmax(logits, dim=1)
+                    all_probs.extend(probabilities[:, self._vuln_class_idx].tolist())
+        return all_probs
 
     def get_classifier_chunk_scores(
         self,
@@ -224,6 +219,7 @@ class ModelManager:
         chunk_overlap: int = 8,
         min_code_lines: int = 2,
         aggregation: str = "max",
+        batch_size: int = 64,
     ) -> list:
         """Scores code *snippets* by cutting each into uniform chunks that fit
         the model's 512-token window, scoring every chunk, then aggregating.
@@ -252,7 +248,7 @@ class ModelManager:
             per_snippet_chunks.append(chunks)
             flat_texts.extend(c.text for c in chunks)
 
-        flat_probs = self.get_classifier_inference(flat_texts) if flat_texts else []
+        flat_probs = self.get_classifier_inference(flat_texts, batch_size=batch_size) if flat_texts else []
 
         results = []
         cursor = 0

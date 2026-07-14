@@ -181,8 +181,7 @@ def test_model_manager_chunk_scores_aggregates(mock_config):
     # ~180 lines of real code -> several 64-line windows with 8-line overlap.
     long_code = "".join(f"def f_{i}():\n    return {i}\n" for i in range(60))
 
-    def fake_inference(texts):
-        # Rising per-chunk probabilities so the max is exactly 1.0.
+    def fake_inference(texts, **kwargs):
         n = len(texts)
         return [round((i + 1) / n, 4) for i in range(n)]
 

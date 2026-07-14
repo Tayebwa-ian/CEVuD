@@ -141,7 +141,7 @@ class TestFinalizeAppliesChunking:
 
         captured_texts = []
 
-        def fake_inference(texts):
+        def fake_inference(texts, **kwargs):
             captured_texts.extend(texts)
             return [0.1] * len(texts)
 
@@ -173,7 +173,7 @@ class TestFinalizeAppliesChunking:
 
         captured_texts = []
 
-        def fake_inference(texts):
+        def fake_inference(texts, **kwargs):
             captured_texts.extend(texts)
             return [0.1] * len(texts)
 
@@ -217,7 +217,7 @@ class TestFinalizeAppliesChunking:
         extractor = RawScoreExtractor(config_path=config_path)
 
         # Return rising probabilities so max = last chunk's probability
-        def fake_inference(texts):
+        def fake_inference(texts, **kwargs):
             n = len(texts)
             return [round((i + 1) / n, 4) for i in range(n)]
 

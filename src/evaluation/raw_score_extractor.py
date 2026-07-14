@@ -390,7 +390,9 @@ class RawScoreExtractor:
                 per_snippet_chunks.append(chunks)
                 flat_texts.extend(c.text for c in chunks)
 
-            flat_probs = self._get_model_manager().get_classifier_inference(flat_texts) if flat_texts else []
+            batch_size = slm_cfg.get("batch_size", 64)
+            print(f"[*] Scoring {len(flat_texts)} chunks in batches of {batch_size} ...")
+            flat_probs = self._get_model_manager().get_classifier_inference(flat_texts, batch_size=batch_size) if flat_texts else []
 
             slm_scores: List[float] = []
             cursor = 0

@@ -189,14 +189,12 @@ class TestConvertCvefixes:
         }
         return row
 
-    @patch("scripts.convert_cvefixes.load_from_disk")
-    def test_emits_vulnerable_and_fixed_samples(self, mock_load_from_disk):
+    @patch("scripts.convert_cvefixes._load_source")
+    def test_emits_vulnerable_and_fixed_samples(self, mock_load_source):
         vuln_code = "def vuln():\n    eval(input())\n"
         safe_code = "def vuln():\n    safe()\n"
         row = self._make_row(vuln_code=vuln_code, fixed_code=safe_code)
-        mock_ds = MagicMock()
-        mock_ds.to_iterable_dataset.return_value = iter([row])
-        mock_load_from_disk.return_value = mock_ds
+        mock_load_source.return_value = iter([row])
 
         with patch("scripts.convert_cvefixes.parse_diff_anchors", return_value={"foo.py": {"pre_start": 1, "pre_end": 2, "post_start": 1, "post_end": 2}}):
             with patch("scripts.convert_cvefixes.is_trivial_change", return_value=False):
@@ -223,12 +221,10 @@ class TestConvertCvefixes:
         assert samples[0]["sample_subtype"] == "vulnerable"
         assert samples[1]["sample_subtype"] == "fixed"
 
-    @patch("scripts.convert_cvefixes.load_from_disk")
-    def test_skips_non_python(self, mock_load_from_disk):
+    @patch("scripts.convert_cvefixes._load_source")
+    def test_skips_non_python(self, mock_load_source):
         row = self._make_row(language="java")
-        mock_ds = MagicMock()
-        mock_ds.to_iterable_dataset.return_value = iter([row])
-        mock_load_from_disk.return_value = mock_ds
+        mock_load_source.return_value = iter([row])
 
         convert_cvefixes(
             dataset_id="hitoshura25/cvefixes",
@@ -245,13 +241,11 @@ class TestConvertCvefixes:
             manifest = json.load(f)
         assert len(manifest) == 0
 
-    @patch("scripts.convert_cvefixes.load_from_disk")
-    def test_drops_empty_projects(self, mock_load_from_disk):
+    @patch("scripts.convert_cvefixes._load_source")
+    def test_drops_empty_projects(self, mock_load_source):
         row = self._make_row()
         row["repo_url"] = ""
-        mock_ds = MagicMock()
-        mock_ds.to_iterable_dataset.return_value = iter([row])
-        mock_load_from_disk.return_value = mock_ds
+        mock_load_source.return_value = iter([row])
 
         convert_cvefixes(
             dataset_id="hitoshura25/cvefixes",
@@ -268,15 +262,13 @@ class TestConvertCvefixes:
             manifest = json.load(f)
         assert len(manifest) == 0
 
-    @patch("scripts.convert_cvefixes.load_from_disk")
-    def test_dedup_drops_duplicate(self, mock_load_from_disk):
+    @patch("scripts.convert_cvefixes._load_source")
+    def test_dedup_drops_duplicate(self, mock_load_source):
         vuln_code = "def vuln():\n    eval(input())\n"
         safe_code = "def vuln():\n    safe()\n"
         row1 = self._make_row(vuln_code=vuln_code, fixed_code=safe_code, hash="abc123")
         row2 = self._make_row(vuln_code=vuln_code, fixed_code=safe_code, hash="def456")
-        mock_ds = MagicMock()
-        mock_ds.to_iterable_dataset.return_value = iter([row1, row2])
-        mock_load_from_disk.return_value = mock_ds
+        mock_load_source.return_value = iter([row1, row2])
 
         with patch("scripts.convert_cvefixes.parse_diff_anchors", return_value={"foo.py": {"pre_start": 1, "pre_end": 2, "post_start": 1, "post_end": 2}}):
             with patch("scripts.convert_cvefixes.is_trivial_change", return_value=False):
