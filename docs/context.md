@@ -53,7 +53,7 @@ so train/inference context is identical.
   imports, applies few-shot capping (per-class, per-CWE, total), and splits by
   project. Uses `.training_cache/clones/` to persist clones across runs.
 - `trainer.py`: Fine-tunes `microsoft/codebert-base` with HuggingFace `Trainer`,
-  saving the best checkpoint by validation F1.
+  saving the best checkpoint by validation F2.
 - `evaluator.py`: Computes accuracy, precision, recall, F1, F2, ROC-AUC, PR-AUC,
   and generates calibration/ROC/PR/confusion plots.
 - `cli.py`: Unified CLI (`build-dataset`, `train`, `evaluate`, `run-all`).

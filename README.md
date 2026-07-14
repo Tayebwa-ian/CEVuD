@@ -25,7 +25,7 @@ The pipeline runs in three stages:
    probabilities are aggregated into `P_slm`, combined with Semgrep severity via
    `R = W₁·S_sev + W₂·P_slm`, and escalated only when `R` crosses a threshold.
    The classifier is trained on CVEfixes (`src/training/`); the default is
-   `jayansh21/codesheriff-bug-classifier` (the default small model), or set `models.classifier_model` in
+    `Denash/codebert-vuln-classifier` (the default small model), or set `models.classifier_model` in
    `config.json` to a custom model (see [`docs/MODEL_CARD.md`](docs/MODEL_CARD.md)).
 3. **Stage 3 — Remediation synthesis.** Only for escalated findings: an LLM
    agent receives the **suspicious code chunks** and **cross-file context**

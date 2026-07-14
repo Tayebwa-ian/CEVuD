@@ -25,7 +25,7 @@ Everything is driven by a single command. No manual steps, no notebook required.
 
 ```bash
 python src/evaluation/run_comparative_evaluation.py \
-  --manifest benchmark_manifest_cvefixes.json \
+  --manifest benchmark_manifest_vudenc.json \
   --config config.json
 ```
 

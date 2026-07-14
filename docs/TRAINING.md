@@ -368,8 +368,9 @@ python -m src.training.cli train --freeze-backbone --epochs 20 --batch-size 8 --
 | `early_stopping_patience`  | 3                  | Epochs w/o val-loss improvement before stopping |
 | `early_stopping_threshold` | 0.0                | Min val-loss drop to count as progress |
 
-The `Trainer` selects and restores the **best checkpoint by validation loss**
-(`eval_loss`) and stops early when val loss plateaus, saving it to
+The `Trainer` selects and restores the **best checkpoint by validation F2**
+(`metric_for_best_model="f2"`, `greater_is_better=True`) and stops early when
+val F2 plateaus, saving it to
 `training_output/run_<timestamp>/model/`.
 
 ### Expected training time (few-shot)

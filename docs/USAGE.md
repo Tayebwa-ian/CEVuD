@@ -38,7 +38,7 @@ system. Every command is also runnable inside the Docker image (see
 
 The zero-cost local gate uses a small vulnerability classifier loaded and
 cached by `src/model_manager.py`. The default is
-`jayansh21/codesheriff-bug-classifier` (125M params, fine-tuned on
+`Denash/codebert-vuln-classifier` (125M params, fine-tuned on
 `microsoft/codebert-base`, the default small model). It is a single-label (softmax) 5-class model
 whose **Security Vulnerability** class gives the threat probability `P_slm`.
 

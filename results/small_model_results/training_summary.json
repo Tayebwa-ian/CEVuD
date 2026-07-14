@@ -1,0 +1,37 @@
+{
+  "train_samples": 1464,
+  "val_samples": 358,
+  "base_model": "microsoft/codebert-base",
+  "train_metrics": {
+    "train_runtime": 8758.8885,
+    "train_samples_per_second": 1.671,
+    "train_steps_per_second": 0.418,
+    "total_flos": 1540778340188160.0,
+    "train_loss": 0.7103400696781489,
+    "epoch": 4.0
+  },
+  "eval_metrics": {
+    "eval_loss": 0.41911664605140686,
+    "eval_accuracy": 0.8492,
+    "eval_precision": 1.0,
+    "eval_recall": 0.2895,
+    "eval_f1": 0.449,
+    "eval_roc_auc": 0.7485,
+    "eval_pr_auc": 0.6187,
+    "eval_confusion_matrix": [
+      [
+        282,
+        0
+      ],
+      [
+        54,
+        22
+      ]
+    ],
+    "eval_runtime": 141.028,
+    "eval_samples_per_second": 2.539,
+    "eval_steps_per_second": 0.638,
+    "epoch": 4.0
+  },
+  "model_dir": "training_output/run_20260713_203733/model"
+}

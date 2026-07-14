@@ -232,8 +232,8 @@ the pipeline's recall can exceed the standalone F1.
 ## 6. What "works as expected" means — checklist
 
 - [x] **Training**: `num_epochs` is a configurable ceiling; `EarlyStoppingCallback`
-      halts when validation loss stops improving for `early_stopping_patience`
-      epochs and the best (lowest `eval_loss`) checkpoint is restored. See
+      halts when validation F2 stops improving for `early_stopping_patience`
+      epochs and the best (highest validation F2) checkpoint is restored. See
       `MODEL_CARD.md` and `TRAINING.md`.
 - [x] **Model metrics**: accuracy / precision / recall / F1 / F2 / ROC-AUC /
       PR-AUC + confusion matrix, computed and plotted by `evaluator.py`.

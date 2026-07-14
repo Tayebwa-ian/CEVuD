@@ -1,0 +1,25 @@
+{
+  "accuracy": 0.8189,
+  "precision": 1.0,
+  "recall": 0.2073,
+  "specificity": 1.0,
+  "f1": 0.3434,
+  "f2": 0.2464,
+  "roc_auc": 0.0,
+  "pr_auc": 0.4964,
+  "confusion_matrix": {
+    "tp": 17,
+    "fp": 0,
+    "fn": 65,
+    "tn": 277
+  },
+  "total_samples": 359,
+  "model_path": "training_output/latest/model",
+  "test_path": "training_data/test.jsonl",
+  "plots": {
+    "confusion_matrix": "training_output/latest/eval/confusion_matrix.png",
+    "roc_curve": "training_output/latest/eval/roc_curve.png",
+    "pr_curve": "training_output/latest/eval/pr_curve.png",
+    "calibration": "training_output/latest/eval/calibration.png"
+  }
+}
