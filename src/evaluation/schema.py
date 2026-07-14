@@ -96,7 +96,7 @@ class BenchmarkSample:
         cve_id: Optional CVE identifier (e.g. "CVE-2021-1234").
         cvss_score: Optional CVSS score for severity ranking/comparison.
         fixed_code: Optional patched version of `source_code` (for patch
-            analysis / CodeSheriff-style fix comparison).
+            analysis / post-fix vulnerability comparison).
         diff_with_context: Optional unified diff with surrounding context.
         sample_subtype: Optional semantic sub-label that disambiguates *why*
             a sample carries its `label`. One of:

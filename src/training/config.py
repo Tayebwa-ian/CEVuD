@@ -91,18 +91,6 @@ class TrainingConfig:
     contrastive_lambda: float = 0.1
     contrastive_temperature: float = 0.1
 
-    # ── Focal loss (class-imbalance remedy) ──────────────────────────────────
-    # When enabled, replace the standard cross-entropy loss with Focal Loss,
-    # which down-weights easy negatives (the abundant safe class) and forces
-    # the model to focus on hard positives (the rare vulnerable class).
-    # ``focal_loss_gamma`` controls the focusing strength (higher = more
-    # focus on hard examples). ``focal_loss_alpha`` is the weight for the
-    # vulnerable class (label=1); the safe class weight is 1 - alpha.
-    # See docs/MODEL_TRAINING.md §Loss.
-    use_focal_loss: bool = False
-    focal_loss_gamma: float = 2.0
-    focal_loss_alpha: float = 0.25
-
     # ── Split ratios ────────────────────────────────────────────────────────
     val_fraction: float = 0.2
     test_fraction: float = 0.2

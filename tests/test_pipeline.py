@@ -55,10 +55,9 @@ def e2e_config(e2e_workspace):
             "triage_report": "stage1_2_triage.json"
         },
         "gate_parameters": {
-            "weight_static": 0.4,
-            "weight_slm": 0.6,
-            "escalation_threshold": 0.52,
-            "slm_override_threshold": 0.90
+            "weight_static": 0.15,
+            "weight_slm": 0.85,
+            "escalation_threshold": 0.2
         },
         "semgrep_severity_map": {
             "INFO": 0.3,

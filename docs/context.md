@@ -87,9 +87,9 @@ helper from `src/run_context.py` (`get_artifact_dir`, `get_vector_db_dir`,
 ## ⚖️ Configuration Contract
 All core thresholds are stored in `config.json`. 
 - `weight_static` + `weight_slm` MUST equal 1.0.
-- `escalation_threshold` (typically 0.52) defines the baseline for sending code to Stage 3.
-- `static_override_value` (1.0) and `slm_override_threshold` (0.90) act as safety nets. If either is breached, the risk score is bypassed and escalation is forced.
+- `escalation_threshold` (0.2 for the tuned gate) defines the baseline for sending code to Stage 3.
+- The static/SLM override was evaluated as an ablation and removed from the production pipeline because it had zero measurable effect on any metric (precision, recall, F2). The evaluation suite still tests it for reproducibility.
 
 **AI ASSISTANT INSTRUCTION**: If a user asks you to "tune" the pipeline, do not manually alter `config.json` blindly. Instead, run the `run_comparative_evaluation.py` suite over a benchmark dataset, read the resulting `comparative_report.json` and sensitivity plots, and propose the data-backed weights to the user.
 
-**The Local SLM (Stage 2 classifier).** The edge gate is `jayansh21/codesheriff-bug-classifier` (fine-tuned from `microsoft/codebert-base`, 125M params). It is a single-label (softmax) 5-class model; `ModelManager` auto-detects this and gates on its **Security Vulnerability** class, so the gate receives a single `[0, 1]` threat probability (`P_slm`). To swap in a different local classifier, change `models.classifier_model` in `config.json` — both single-label (softmax) and multi-label (sigmoid) heads are supported automatically.
+**The Local SLM (Stage 2 classifier).** The edge gate is `jayansh21/codesheriff-bug-classifier` (fine-tuned from `microsoft/codebert-base`, 125M params, the default small model). It is a single-label (softmax) 5-class model; `ModelManager` auto-detects this and gates on its **Security Vulnerability** class, so the gate receives a single `[0, 1]` threat probability (`P_slm`). To swap in a different local classifier, change `models.classifier_model` in `config.json` — both single-label (softmax) and multi-label (sigmoid) heads are supported automatically.

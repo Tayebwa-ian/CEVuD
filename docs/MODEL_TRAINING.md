@@ -87,8 +87,8 @@ mined-safe samples always land in the same split.
 ### Failure modes observed
 1. **Majority-class collapse** — Precision=1.0, recall≈0.2. The model learned
    to predict almost everything as `safe`. The class weights from
-   `_compute_class_weights` (~[1.0, 3.6]) were too weak to overcome the
-   imbalance.
+   `_compute_class_weights` (~[0.64, 2.30]) were too weak to overcome the
+   imbalance on this small dataset.
 2. **Test ROC AUC = 0.0** — Bug fixed in this revision. The standalone
    `evaluator.py` was loading `latest/model` (epoch 4) instead of the best
    checkpoint (`checkpoint-366`, epoch 1). The model degenerated after the best
@@ -106,13 +106,14 @@ Freezes the CodeBERT encoder + pooler; trains only the `classifier.*` head.
 Far more sample-efficient and stable for small datasets (~1.4k chunks), and
 cuts training time by 5–10×. Recommended default for this data scale.
 
-### 4.2 Focal Loss (`--focal-loss`)
-Replaces standard cross-entropy with
-`FocalLoss(gamma=2.0, alpha=0.25)`. Down-weights easy negatives (the abundant
-safe class) and forces the model to focus on hard positives (the rare
-vulnerable class). Activated when `use_focal_loss=True` in config or
-`--focal-loss` on the CLI. `alpha` is the weight for `label=1` (vulnerable);
-the safe class weight is `1 - alpha`.
+### 4.2 Class weights
+CEVuD uses inverse-frequency class weights to counter the vulnerable/safe
+imbalance. `_compute_class_weights` assigns each class a weight of
+``total / (num_labels * count)``, so the minority (vulnerable) class gets a
+higher weight. For the current ~1 : 3.6 vulnerable/safe split this yields
+roughly ``[0.64, 2.30]`` — the vulnerable class receives about 3.6× the
+per-sample gradient signal of the safe class. These weights are passed to
+`torch.nn.CrossEntropyLoss(weight=...)` inside `WeightedTrainer`.
 
 ### 4.3 Supervised contrastive (`--contrastive`)
 Adds a contrastive term on top of CE: a `vulnerable` function is pulled toward
@@ -132,12 +133,11 @@ in the same project is dropped. This prevents a lightly-edited copy of a
 vulnerable function from entering the safe class and collapsing training to
 `P=0.5`.
 
-### 4.6 Class weights
-When not using focal loss, `_compute_class_weights` computes inverse-frequency
-weights normalized so the average weight is 1.0. For the current ~1:3.6 split,
-this yields ~[1.0, 3.6]. With focal loss enabled, class weights are still
-computed but the loss function switches to FocalLoss; the weights are retained
-as a fallback if focal loss is disabled.
+### 4.6 Near-duplicate guard
+After chunking, any `label=0` chunk >0.75 token-similar to a `label=1` chunk
+in the same project is dropped. This prevents a lightly-edited copy of a
+vulnerable function from entering the safe class and collapsing training to
+`P=0.5`.
 
 ## 5. Hyperparameters
 
@@ -151,9 +151,6 @@ as a fallback if focal loss is disabled.
 | `num_epochs` | 20 (early stop) | Early stopping patience=3 on val loss |
 | `warmup_ratio` | 0.1 | |
 | `freeze_backbone` | False | **Recommended True** for small datasets |
-| `use_focal_loss` | False | **Recommended True** for imbalanced data |
-| `focal_loss_gamma` | 2.0 | Higher = more focus on hard examples |
-| `focal_loss_alpha` | 0.25 | Weight for vulnerable class (label=1) |
 | `contrastive` | False | Experimental |
 | `chunk_max_lines` | 64 | |
 | `chunk_overlap` | 8 | |

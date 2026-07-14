@@ -21,7 +21,7 @@ is itself worth stating explicitly in the paper:
 
     - "SLM only" and "SLM + LLM without Stage 1" are
       likewise the same rule: without Stage 1 filtering, the SLM score
-      alone decides escalation. See `codesheriff_only`.
+      alone decides escalation. See `small_model_only`.
 
 This module intentionally has ZERO dependency on triage_orchestrator.py or
 any I/O — `triage_orchestrator.py` imports `linear_weighted_gate` FROM here
@@ -56,20 +56,20 @@ def linear_weighted_gate(severity_weight: float, slm_score: float, params: Dict[
         severity_weight: Semgrep severity mapped to [0, 1].
         slm_score: SLM classifier's vulnerability probability, [0, 1].
         params: Dict with keys:
-            weight_static (float): default 0.4
-            weight_slm (float): default 0.6
-            escalation_threshold (float): default 0.52
-            override_enabled (bool): default True
+            weight_static (float): default 0.15
+            weight_slm (float): default 0.85
+            escalation_threshold (float): default 0.2
+            override_enabled (bool): default False
             static_override_value (float): default 1.0 (i.e. ERROR severity)
             slm_override_threshold (float): default 0.90
 
     Returns:
         bool: True if the sample should be escalated to Stage 3.
     """
-    weight_static = params.get("weight_static", 0.4)
-    weight_slm = params.get("weight_slm", 0.6)
-    threshold = params.get("escalation_threshold", 0.52)
-    override_enabled = params.get("override_enabled", True)
+    weight_static = params.get("weight_static", 0.15)
+    weight_slm = params.get("weight_slm", 0.85)
+    threshold = params.get("escalation_threshold", 0.2)
+    override_enabled = params.get("override_enabled", False)
     static_override_value = params.get("static_override_value", 1.0)
     slm_override_threshold = params.get("slm_override_threshold", 0.90)
 
@@ -105,7 +105,7 @@ def semgrep_only(severity_weight: float, slm_score: float, params: Dict[str, Any
     return severity_weight > threshold
 
 
-def codesheriff_only(severity_weight: float, slm_score: float, params: Dict[str, Any] = None) -> bool:
+def small_model_only(severity_weight: float, slm_score: float, params: Dict[str, Any] = None) -> bool:
     """Escalates based solely on the SLM probability, ignoring Semgrep entirely.
 
     This is both the "SLM only" detector baseline and the
@@ -127,13 +127,13 @@ def always_llm(severity_weight: float, slm_score: float, params: Dict[str, Any] 
     return True
 
 
-def semgrep_or_codesheriff(severity_weight: float, slm_score: float, params: Dict[str, Any] = None) -> bool:
+def semgrep_or_small_model(severity_weight: float, slm_score: float, params: Dict[str, Any] = None) -> bool:
     """OR-gate baseline: escalate if EITHER signal alone would escalate.
     Contrast with `linear_weighted_gate`, which combines the two signals
     rather than treating them as independent triggers.
     """
     params = params or {}
-    return semgrep_only(severity_weight, slm_score, params) or codesheriff_only(severity_weight, slm_score, params)
+    return semgrep_only(severity_weight, slm_score, params) or small_model_only(severity_weight, slm_score, params)
 
 
 # ---------------------------------------------------------------------------
@@ -178,20 +178,22 @@ GATE_STRATEGIES: Dict[str, StrategySpec] = {
         "Semgrep only",
         "Escalate on any static finding. Equivalent to 'Semgrep + LLM without Stage 2'.",
     ),
-    "codesheriff_only": StrategySpec(
-        codesheriff_only,
-        "SLM (local classifier) only",
-        "Escalate on SLM probability alone. Equivalent to 'SLM + LLM without Stage 1'.",
+    "small_model_only": StrategySpec(
+        small_model_only,
+        "Escalate if the local small model's P(vuln) exceeds the threshold. "
+        "Pure neural baseline — no static signal.",
+        {"threshold": 0.5},
     ),
     "always_llm": StrategySpec(
         always_llm,
         "Always escalate",
         "Send every sample to the LLM. Upper bound on recall and on LLM cost.",
     ),
-    "semgrep_or_codesheriff": StrategySpec(
-        semgrep_or_codesheriff,
-        "Semgrep OR SLM",
-        "Escalate if either single-signal baseline alone would escalate.",
+    "semgrep_or_small_model": StrategySpec(
+        semgrep_or_small_model,
+        "OR-gate: escalate if EITHER the static severity OR the small model "
+        "score triggers. Naive combination — no learned weighting.",
+        {},
     ),
     "cevud_full": StrategySpec(
         linear_weighted_gate,

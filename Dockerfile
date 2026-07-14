@@ -39,7 +39,7 @@ RUN pip install --no-cache-dir transformers huggingface_hub
 ENV HF_HUB_CACHE=/app/model_cache
 RUN python - <<'PY'
 from huggingface_hub import snapshot_download
-snapshot_download('jayansh21/codesheriff-bug-classifier', revision='main')
+snapshot_download('jayansh21/codesheriff-bug-classifier', revision='main')  # default small model
 snapshot_download('microsoft/codebert-base')
 PY
 # ==========================================

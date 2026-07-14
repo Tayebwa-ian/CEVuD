@@ -125,11 +125,11 @@ Seven strategies are evaluated on the held-out test split:
 | Strategy | Description | What it answers |
 |----------|-------------|-----------------|
 | `semgrep_only` | Escalate if Semgrep severity > threshold | "Does static analysis alone catch enough?" |
-| `codesheriff_only` | Escalate if SLM `P(vuln)` > 0.5 | "Does the SLM alone catch enough?" |
+| `small_model_only` | Escalate if SLM `P(vuln)` > 0.5 | "Does the SLM alone catch enough?" |
 | `always_llm` | Escalate everything | Upper bound on recall, upper bound on cost |
-| `semgrep_or_codesheriff` | OR of the two single-signal rules | "Does a simple OR-gate beat learned weights?" |
-| `cevud_tuned_no_override` | Linear gate with tuned weights, no override | "Does the linear combination itself help?" |
-| `cevud_tuned_with_override` | Linear gate + tuned weights + override | Full production pipeline performance |
+| `semgrep_or_small_model` | OR of the two single-signal rules | "Does a simple OR-gate beat learned weights?" |
+| `cevud_tuned_no_override` | Linear gate with tuned weights, no override | Production CEVuD pipeline performance |
+| `cevud_tuned_with_override` | Linear gate + tuned weights + override | Ablation: does the override add anything? |
 | `logistic_regression` | Learned non-linear boundary | "Is linearity justified?" |
 
 **Metrics reported for every strategy:**
@@ -188,8 +188,7 @@ Once the best weights are determined:
   "gate_parameters": {
     "weight_static": <best_weight_static>,
     "weight_slm": 1 - <best_weight_static>,
-    "escalation_threshold": <best_threshold>,
-    "slm_override_threshold": 0.90
+    "escalation_threshold": <best_threshold>
   }
 }
 ```

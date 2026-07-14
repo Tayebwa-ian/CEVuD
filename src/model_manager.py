@@ -58,10 +58,9 @@ class ModelManager:
                     "embedding_model": "microsoft/codebert-base"
                 },
                 "gate_parameters": {
-                    "weight_static": 0.4,
-                    "weight_slm": 0.6,
-                    "escalation_threshold": 0.52,
-                    "slm_override_threshold": 0.90
+                    "weight_static": 0.15,
+                    "weight_slm": 0.85,
+                    "escalation_threshold": 0.2
                 },
                 "semgrep_severity_map": {
                     "INFO": 0.3,
@@ -277,7 +276,7 @@ class ModelManager:
         Two output formats are supported and auto-detected from the model's
         ``id2label`` mapping:
 
-        * **Single-label softmax** (e.g. ``jayansh21/codesheriff-bug-classifier``):
+        * **Single-label softmax** (e.g. ``jayansh21/codesheriff-bug-classifier``, the default small model):
           5 mutually-exclusive classes, one of which is the security
           vulnerability class -> ``P(vuln) = softmax[vuln_idx]``.
         * **Multi-label sigmoid** (e.g.

@@ -25,7 +25,7 @@ The pipeline runs in three stages:
    probabilities are aggregated into `P_slm`, combined with Semgrep severity via
    `R = W₁·S_sev + W₂·P_slm`, and escalated only when `R` crosses a threshold.
    The classifier is trained on CVEfixes (`src/training/`); the default is
-   `jayansh21/codesheriff-bug-classifier`, or set `models.classifier_model` in
+   `jayansh21/codesheriff-bug-classifier` (the default small model), or set `models.classifier_model` in
    `config.json` to a custom model (see [`docs/MODEL_CARD.md`](docs/MODEL_CARD.md)).
 3. **Stage 3 — Remediation synthesis.** Only for escalated findings: an LLM
    agent receives the **suspicious code chunks** and **cross-file context**
@@ -109,9 +109,8 @@ and **delete `training_data/` + `training_output/`** before rebuilding.
 ---
 
 ## Configuration
-Key gating thresholds live in `config.json`: `weight_static` (0.4),
-`weight_slm` (0.6), `escalation_threshold` (0.52), `slm_override_threshold`
-(0.90). The new chunking/aggregation behaviour is controlled by the
+Key gating thresholds live in `config.json`: `weight_static` (0.15),
+`weight_slm` (0.85), `escalation_threshold` (0.2). The new chunking/aggregation behaviour is controlled by the
 `slm_inference` block (`chunk_max_lines`, `chunk_overlap`, `aggregation`,
 `top_chunks_for_llm`) and the training `chunk` block.
 

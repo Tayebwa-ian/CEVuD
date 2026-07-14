@@ -23,9 +23,9 @@ TEST_CONFIG = {
         "INFO": 0.3
     },
     "gate_parameters": {
-        "weight_static": 0.4,
-        "weight_slm": 0.6,
-        "escalation_threshold": 0.52
+        "weight_static": 0.15,
+        "weight_slm": 0.85,
+        "escalation_threshold": 0.2
     }
 }
 
@@ -191,61 +191,68 @@ def test_slm_inference_batch_multiple_snippets():
         mock_inference.assert_called_once_with(snippets)
 
 def test_evaluate_gate_standard_case():
-    """Test standard risk calculation without overrides."""
+    """Test standard risk calculation with tuned weights."""
     orchestrator = TriageOrchestrator("config.json")
     
     # Test case: WARNING severity (0.7) + SLM 0.6 score
-    # risk_score = (0.4 * 0.7) + (0.6 * 0.6) = 0.64
-    # threshold = 0.52, so should escalate
+    # risk_score = (0.15 * 0.7) + (0.85 * 0.6) = 0.615
+    # threshold = 0.2, so should escalate
     result = orchestrator.evaluate_gate("WARNING", 0.6)
     
-    assert result["risk_score"] == 0.64
+    assert result["risk_score"] == 0.615
     assert result["escalate"] is True
     assert result["metrics"]["static_severity_weight"] == 0.7
     assert result["metrics"]["slm_probability_score"] == 0.6
-    assert result["metrics"]["override_triggered"] is False
 
-def test_evaluate_gate_static_override():
-    """Test static severity override (ERROR = 1.0)."""
+def test_evaluate_gate_low_risk_no_escalation():
+    """Test that low combined risk does not escalate."""
     orchestrator = TriageOrchestrator("config.json")
     
-    # Test case: ERROR severity (1.0) + SLM 0.1 score (low)
-    # This should trigger override even though combined score is low
-    result = orchestrator.evaluate_gate("ERROR", 0.1)
+    # INFO severity (0.3) + SLM 0.1 score
+    # risk_score = (0.15 * 0.3) + (0.85 * 0.1) = 0.045 + 0.085 = 0.13
+    # threshold = 0.2, so should NOT escalate
+    result = orchestrator.evaluate_gate("INFO", 0.1)
     
-    assert result["risk_score"] == 1.0  # Forced to 1.0 due to override
-    assert result["escalate"] is True   # Override triggers escalation
-    assert result["metrics"]["static_severity_weight"] == 1.0
+    assert result["risk_score"] == 0.13
+    assert result["escalate"] is False
+    assert result["metrics"]["static_severity_weight"] == 0.3
     assert result["metrics"]["slm_probability_score"] == 0.1
-    assert result["metrics"]["override_triggered"] is True
 
-def test_evaluate_gate_slm_override():
-    """Test SLM probability override (> 0.9)."""
+def test_evaluate_gate_high_risk_escalates():
+    """Test that high combined risk escalates."""
     orchestrator = TriageOrchestrator("config.json")
     
-    # Test case: WARNING severity (0.7) + SLM 0.95 score (> 0.9)
-    # This should trigger override even if combined score is below threshold
-    result = orchestrator.evaluate_gate("WARNING", 0.95)
-    
-    assert result["risk_score"] == 1.0  # Forced to 1.0 due to override
-    assert result["escalate"] is True   # Override triggers escalation
-    assert result["metrics"]["static_severity_weight"] == 0.7
-    assert result["metrics"]["slm_probability_score"] == 0.95
-    assert result["metrics"]["override_triggered"] is True
-
-def test_evaluate_gate_combined_override():
-    """Test both static and SLM overrides simultaneously."""
-    orchestrator = TriageOrchestrator("config.json")
-    
-    # Test case: ERROR severity (1.0) + SLM 0.95 score (> 0.9)
-    # Both overrides should trigger
+    # ERROR severity (1.0) + SLM 0.95 score
+    # risk_score = (0.15 * 1.0) + (0.85 * 0.95) = 0.9575
+    # threshold = 0.2, so should escalate
     result = orchestrator.evaluate_gate("ERROR", 0.95)
     
-    assert result["risk_score"] == 1.0
+    assert result["risk_score"] == 0.9575
     assert result["escalate"] is True
     assert result["metrics"]["static_severity_weight"] == 1.0
     assert result["metrics"]["slm_probability_score"] == 0.95
-    assert result["metrics"]["override_triggered"] is True
+
+def test_evaluate_gate_threshold_boundary():
+    """Test behavior at the threshold boundary."""
+    orchestrator = TriageOrchestrator("config.json")
+    
+    # Exactly at threshold: NONE (0.0) + SLM 0.2353 ≈ 0.2
+    # risk_score = 0.15*0.0 + 0.85*0.2353 ≈ 0.2
+    result = orchestrator.evaluate_gate("NONE", 0.2353)
+    
+    assert result["escalate"] is True
+    assert result["risk_score"] >= 0.2
+
+def test_evaluate_gate_threshold_boundary():
+    """Test behavior at the threshold boundary."""
+    orchestrator = TriageOrchestrator("config.json")
+    
+    # Exactly at threshold: NONE (0.0) + SLM 0.2353 ≈ 0.2
+    # risk_score = 0.15*0.0 + 0.85*0.2353 ≈ 0.2
+    result = orchestrator.evaluate_gate("NONE", 0.2353)
+    
+    assert result["escalate"] is True
+    assert result["risk_score"] >= 0.2
 
 def test_process_pipeline_basic_functionality(temp_workspace):
     """Test the full pipeline execution with minimal mocking.
@@ -295,7 +302,7 @@ def test_process_pipeline_basic_functionality(temp_workspace):
         assert "findings" in output
         assert "status" in output
 
-        # Validate escalation triggered (due to ERROR + SLM 0.95 override)
+        # Validate escalation triggered (risk score 0.9575 > threshold 0.2)
         assert output["gate_decision"]["escalate_to_llm"] is True
         assert output["status"] == "VULNERABLE"
 

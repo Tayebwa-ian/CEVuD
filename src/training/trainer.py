@@ -247,55 +247,13 @@ def _supervised_contrastive_loss(
     return per_anchor[has_pos].mean()
 
 
-class FocalLoss(torch.nn.Module):
-    """Focal Loss for multi-class classification.
-
-    Addresses class imbalance by down-weighting easy examples and focusing
-    training on hard negatives. Standard cross-entropy is recovered when
-    ``gamma=0``.
-
-    Args:
-        gamma: Focusing parameter. Higher values increase the focus on hard
-            examples (default 2.0).
-        alpha: Weight for the vulnerable class (label=1). The safe class
-            weight is ``1 - alpha`` (default 0.25).
-        reduction: Reduction method — ``"mean"`` or ``"sum"``.
-    """
-
-    def __init__(
-        self, gamma: float = 2.0, alpha: float = 0.25, reduction: str = "mean"
-    ) -> None:
-        super().__init__()
-        self.gamma = gamma
-        self.alpha = alpha
-        self.reduction = reduction
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        ce = torch.nn.functional.cross_entropy(logits, targets, reduction="none")
-        pt = torch.exp(-ce)
-        alpha_t = torch.where(
-            targets == 1,
-            torch.tensor(self.alpha, device=logits.device),
-            torch.tensor(1.0 - self.alpha, device=logits.device),
-        )
-        focal = alpha_t * (1 - pt).pow(self.gamma) * ce
-        if self.reduction == "sum":
-            return focal.sum()
-        return focal.mean()
-
-
 class WeightedTrainer(Trainer):
     """`Trainer` variant that applies per-class weights to the cross-entropy
-    loss, optionally replaces it with Focal Loss, and optionally trains only
-    the classifier head (frozen backbone).
+    loss and optionally trains only the classifier head (frozen backbone).
 
     Vulnerability datasets are typically class-imbalanced; weighting the loss
     prevents the model from collapsing toward the majority class and gives the
     minority (vulnerable) class a stronger gradient signal.
-
-    When ``use_focal_loss=True`` the standard cross-entropy is replaced with
-    ``FocalLoss(gamma, alpha)``, which down-weights easy negatives and forces
-    the model to focus on hard positives. See docs/MODEL_TRAINING.md §Loss.
 
     When ``contrastive=True`` an optional supervised-contrastive term is added
     on top of the cross-entropy loss (weighted by ``contrastive_lambda``), so
@@ -306,9 +264,7 @@ class WeightedTrainer(Trainer):
     def __init__(
         self, *args, class_weights=None, freeze_backbone=False,
         contrastive: bool = False, contrastive_lambda: float = 0.1,
-        contrastive_temperature: float = 0.1,
-        use_focal_loss: bool = False, focal_loss_gamma: float = 2.0,
-        focal_loss_alpha: float = 0.25, **kwargs
+        contrastive_temperature: float = 0.1, **kwargs
     ):
         super().__init__(*args, **kwargs)
         self.class_weights = class_weights
@@ -316,20 +272,12 @@ class WeightedTrainer(Trainer):
         self.contrastive = contrastive
         self.contrastive_lambda = contrastive_lambda
         self.contrastive_temperature = contrastive_temperature
-        self.use_focal_loss = use_focal_loss
-        self.focal_loss_gamma = focal_loss_gamma
-        self.focal_loss_alpha = focal_loss_alpha
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels = inputs.pop("labels")
         outputs = model(**inputs, output_hidden_states=True)
         logits = outputs.logits
-        if self.use_focal_loss:
-            loss_fct = FocalLoss(
-                gamma=self.focal_loss_gamma,
-                alpha=self.focal_loss_alpha,
-            )
-        elif self.class_weights is not None:
+        if self.class_weights is not None:
             w = self.class_weights.to(logits.device)
             loss_fct = torch.nn.CrossEntropyLoss(weight=w)
         else:
@@ -355,9 +303,16 @@ class WeightedTrainer(Trainer):
 
 
 def _compute_class_weights(labels, num_labels: int) -> torch.Tensor:
+    """Inverse-frequency class weights to counter imbalance.
+
+    Each class weight is ``total / (num_labels * count)``, which gives the
+    minority class a higher weight. For a 1 : 3.6 vulnerable/safe split this
+    yields roughly ``[0.64, 2.30]`` (safe weight ≈ 1.0, vulnerable weight ≈
+    3.6× higher), ensuring the vulnerable class contributes a stronger gradient
+    signal relative to its frequency.
+    """
     counts = collections.Counter(labels)
     total = max(1, sum(counts.values()))
-    # Inverse-frequency weighting normalised so the average weight is 1.0.
     weights = [
         total / (num_labels * max(1, counts.get(i, 0)))
         for i in range(num_labels)
@@ -528,9 +483,6 @@ def train(cfg: TrainingConfig) -> Dict[str, Any]:
         contrastive=cfg.contrastive,
         contrastive_lambda=cfg.contrastive_lambda,
         contrastive_temperature=cfg.contrastive_temperature,
-        use_focal_loss=cfg.use_focal_loss,
-        focal_loss_gamma=cfg.focal_loss_gamma,
-        focal_loss_alpha=cfg.focal_loss_alpha,
         callbacks=[
             EarlyStoppingCallback(
                 early_stopping_patience=cfg.early_stopping_patience,

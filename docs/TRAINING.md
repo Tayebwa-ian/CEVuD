@@ -1,4 +1,4 @@
-# Training a Custom Vulnerability Classifier (Few-Shot)
+# Training a Custom Vulnerability Classifier
 
 ## Overview
 
@@ -15,7 +15,7 @@ by `src/evaluation/`. The pipeline supports two regimes:
   (~100 samples). Good for verifying the pipeline end-to-end, but **too small to
   learn anything useful** (a 125M-param model needs far more signal). Treat its
   metrics as a pipeline sanity check, not a usable model.
-* **Real training** — build on a large slice of the full 1,538-sample manifest.
+* **Real training** — build on a large slice of the full CVEfixes manifest.
   This is what produces a model worth deploying.
 
 The pipeline uses **class-weighted loss** to counter vulnerability-class
@@ -25,6 +25,12 @@ and stable when data is limited, and much faster to train.
 
 The trained model produces `P(vulnerable) ∈ [0, 1]` and can be dropped into
 `config.json` as the new Stage-2 local classifier with zero code changes.
+
+> **Note:** The results reported in this document are from a single training run
+> with the default hyperparameters. Future runs with different seeds, larger
+> datasets, the contrastive objective, or different random initializations may
+> produce different metrics. The training pipeline is fully reproducible via the
+> commands below.
 
 ## Model Architecture
 
@@ -46,6 +52,68 @@ the `classifier.*` submodule is trained and the encoder + pooler stay frozen.
 This is documented in full (with load snippet, hyperparameters, and limitations)
 in **[`MODEL_CARD.md`](MODEL_CARD.md)** — that file is
 the HuggingFace-ready model card.
+
+## Reported Training Results
+
+The following results are from the most recent training run
+(`training_output/run_20260713_203733`). Future runs may produce different
+numbers depending on dataset size, random seed, and hyperparameters.
+
+### Training Summary
+
+| Metric | Value |
+|--------|-------|
+| Train samples | 1,464 |
+| Validation samples | 358 |
+| Epochs completed | 4 (early stopped at patience=3) |
+| Train loss | 0.7103 |
+| Validation loss | 0.4191 |
+| **Accuracy** | **84.9%** |
+| **Precision** | **100.0%** |
+| **Recall** | **28.9%** |
+| **F1** | **44.9%** |
+| **ROC-AUC** | **74.9%** |
+| **PR-AUC** | **61.9%** |
+| Confusion matrix (val) | [[282, 0], [54, 22]] (TN, FP / FN, TP) |
+
+### Interpretation
+
+The model is **highly conservative** as a standalone classifier: it achieves
+100% precision (no false positives) but only 28.9% recall (misses 71% of
+vulnerabilities). This is the expected behavior of a small model trained on a
+difficult, imbalanced corpus — it learns strong safe-code patterns but underfits
+the diverse vulnerability topology. The ROC-AUC of 74.9% indicates the model
+learns a discriminative ranking; the low recall reflects the decision threshold,
+not the ranking quality.
+
+**This model is designed to be a component of a gated pipeline, not a standalone
+classifier.** When combined with the static signal via the CEVuD linear gate
+($W_1=0.15, W_2=0.85$), the ensemble achieves 95.2% recall on the VUDENC test
+split — substantially higher than the small model alone (70.5%). See
+`docs/research_outline.md` Section 7 for the full gate evaluation.
+
+### Reproducing These Results
+
+```bash
+# 1. Build the full CVEfixes dataset (no caps)
+python -m src.training.cli build-dataset \
+  --manifest benchmark_manifest_cvefixes.json \
+  --benign-manifest benign_controls_manifest.json \
+  --max-workers 8
+
+# 2. Train with the reported hyperparameters
+python -m src.training.cli train \
+  --epochs 20 \
+  --batch-size 8 \
+  --lr 2e-5
+
+# 3. Evaluate on the CVEfixes test split
+python -m src.training.cli evaluate
+```
+
+The best checkpoint is saved to `training_output/latest/model` (a symlink to the
+most recent timestamped run directory). The `training_summary.json` in that
+directory records the exact metrics above.
 
 ## Datasets: model training vs. gate study
 

@@ -90,12 +90,6 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Min val-loss improvement to count as progress (default 0.0).")
     tr.add_argument("--allow-noisy-data", action="store_true",
                     help="Train even if the dataset contains contradictory samples.")
-    tr.add_argument("--focal-loss", action="store_true",
-                    help="Use Focal Loss instead of cross-entropy (helps with class imbalance).")
-    tr.add_argument("--focal-gamma", type=float, default=None,
-                    help="Focal loss focusing parameter (default 2.0).")
-    tr.add_argument("--focal-alpha", type=float, default=None,
-                    help="Focal loss weight for vulnerable class (default 0.25).")
 
     # ── evaluate ────────────────────────────────────────────────────────────
     ev = sub.add_parser("evaluate", help="Evaluate a trained model on the test split")
@@ -145,12 +139,6 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Temperature of the contrastive term (default 0.1).")
     ra.add_argument("--allow-noisy-data", action="store_true",
                     help="Train even if the dataset contains contradictory samples.")
-    ra.add_argument("--focal-loss", action="store_true",
-                    help="Use Focal Loss instead of cross-entropy (helps with class imbalance).")
-    ra.add_argument("--focal-gamma", type=float, default=None,
-                    help="Focal loss focusing parameter (default 2.0).")
-    ra.add_argument("--focal-alpha", type=float, default=None,
-                    help="Focal loss weight for vulnerable class (default 0.25).")
 
     return p
 
@@ -206,12 +194,6 @@ def cmd_train(args, cfg: TrainingConfig) -> None:
         cfg.contrastive_lambda = args.contrastive_lambda
     if getattr(args, "contrastive_temperature", None) is not None:
         cfg.contrastive_temperature = args.contrastive_temperature
-    if getattr(args, "focal_loss", False):
-        cfg.use_focal_loss = True
-    if getattr(args, "focal_gamma", None) is not None:
-        cfg.focal_loss_gamma = args.focal_gamma
-    if getattr(args, "focal_alpha", None) is not None:
-        cfg.focal_loss_alpha = args.focal_alpha
     train(cfg)
 
 

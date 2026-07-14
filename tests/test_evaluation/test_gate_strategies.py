@@ -16,9 +16,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from evaluation.gate_strategies import (
     linear_weighted_gate,
     semgrep_only,
-    codesheriff_only,
+    small_model_only,
     always_llm,
-    semgrep_or_codesheriff,
+    semgrep_or_small_model,
     logistic_regression_gate,
 )
 
@@ -27,23 +27,23 @@ class TestLinearWeightedGate:
     """Tests for the production CEVuD linear gate."""
 
     def test_standard_escalation_above_threshold(self):
-        # weight_static=0.4, severity=1.0 (ERROR) -> 0.4
-        # weight_slm=0.6, slm=0.5 -> 0.3
-        # risk = 0.7 > threshold 0.52 -> escalate
+        # weight_static=0.15, severity=1.0 (ERROR) -> 0.15
+        # weight_slm=0.85, slm=0.5 -> 0.425
+        # risk = 0.575 > threshold 0.2 -> escalate
         result = linear_weighted_gate(1.0, 0.5, {
-            "weight_static": 0.4,
-            "weight_slm": 0.6,
-            "escalation_threshold": 0.52,
+            "weight_static": 0.15,
+            "weight_slm": 0.85,
+            "escalation_threshold": 0.2,
             "override_enabled": False,
         })
         assert result is True
 
     def test_standard_no_escalation_below_threshold(self):
-        # severity=0.0, slm=0.1 -> risk = 0.06 < 0.52
+        # severity=0.0, slm=0.1 -> risk = 0.085 < 0.2
         result = linear_weighted_gate(0.0, 0.1, {
-            "weight_static": 0.4,
-            "weight_slm": 0.6,
-            "escalation_threshold": 0.52,
+            "weight_static": 0.15,
+            "weight_slm": 0.85,
+            "escalation_threshold": 0.2,
             "override_enabled": False,
         })
         assert result is False
@@ -51,9 +51,9 @@ class TestLinearWeightedGate:
     def test_static_override_forces_escalation(self):
         # severity=1.0 (ERROR) triggers static override regardless of SLM
         result = linear_weighted_gate(1.0, 0.0, {
-            "weight_static": 0.4,
-            "weight_slm": 0.6,
-            "escalation_threshold": 0.52,
+            "weight_static": 0.15,
+            "weight_slm": 0.85,
+            "escalation_threshold": 0.2,
             "override_enabled": True,
             "static_override_value": 1.0,
             "slm_override_threshold": 0.90,
@@ -63,9 +63,9 @@ class TestLinearWeightedGate:
     def test_slm_override_forces_escalation(self):
         # slm=0.95 > 0.90 triggers SLM override regardless of severity
         result = linear_weighted_gate(0.0, 0.95, {
-            "weight_static": 0.4,
-            "weight_slm": 0.6,
-            "escalation_threshold": 0.52,
+            "weight_static": 0.15,
+            "weight_slm": 0.85,
+            "escalation_threshold": 0.2,
             "override_enabled": True,
             "static_override_value": 1.0,
             "slm_override_threshold": 0.90,
@@ -73,12 +73,12 @@ class TestLinearWeightedGate:
         assert result is True
 
     def test_slm_just_below_override_no_escalation(self):
-        # slm=0.89 < 0.90, severity=0.0 -> risk = 0.534 (0.6*0.89)
-        # 0.534 >= 0.52 -> escalates via base gate
+        # slm=0.89 < 0.90, severity=0.0 -> risk = 0.7565 (0.85*0.89)
+        # 0.7565 >= 0.2 -> escalates via base gate
         result = linear_weighted_gate(0.0, 0.89, {
-            "weight_static": 0.4,
-            "weight_slm": 0.6,
-            "escalation_threshold": 0.52,
+            "weight_static": 0.15,
+            "weight_slm": 0.85,
+            "escalation_threshold": 0.2,
             "override_enabled": True,
             "static_override_value": 1.0,
             "slm_override_threshold": 0.90,
@@ -86,50 +86,50 @@ class TestLinearWeightedGate:
         assert result is True
 
     def test_override_disabled_ignores_high_slm(self):
-        # slm=0.95 but override disabled -> risk = 0.6*0.95 = 0.57 >= 0.52
+        # slm=0.95 but override disabled -> risk = 0.85*0.95 = 0.8075 >= 0.2
         result = linear_weighted_gate(0.0, 0.95, {
-            "weight_static": 0.4,
-            "weight_slm": 0.6,
-            "escalation_threshold": 0.52,
+            "weight_static": 0.15,
+            "weight_slm": 0.85,
+            "escalation_threshold": 0.2,
             "override_enabled": False,
         })
         assert result is True
 
     def test_default_params_used_when_missing(self):
-        # Missing params -> defaults: w_static=0.4, w_slm=0.6, threshold=0.52
-        # severity=0.7 -> 0.28, slm=0.5 -> 0.3, risk=0.58 >= 0.52
+        # Missing params -> defaults: w_static=0.15, w_slm=0.85, threshold=0.2
+        # severity=0.7 -> 0.105, slm=0.5 -> 0.425, risk=0.53 >= 0.2
         result = linear_weighted_gate(0.7, 0.5, {})
         assert result is True
 
     def test_weight_symmetric(self):
         # weight_static=0.6, weight_slm=0.4 (inverse of default)
-        # severity=0.0, slm=1.0 -> risk = 0.4 >= 0.52? No, 0.4 < 0.52
+        # severity=0.0, slm=1.0 -> risk = 0.4 >= 0.2
         result = linear_weighted_gate(0.0, 1.0, {
             "weight_static": 0.6,
             "weight_slm": 0.4,
-            "escalation_threshold": 0.52,
+            "escalation_threshold": 0.2,
             "override_enabled": False,
         })
-        assert result is False
+        assert result is True
 
     def test_extreme_weights(self):
         # weight_static=1.0, weight_slm=0.0
-        # severity=0.0 -> risk=0.0 < 0.52
+        # severity=0.0 -> risk=0.0 < 0.2
         result = linear_weighted_gate(0.0, 1.0, {
             "weight_static": 1.0,
             "weight_slm": 0.0,
-            "escalation_threshold": 0.52,
+            "escalation_threshold": 0.2,
             "override_enabled": False,
         })
         assert result is False
 
     def test_extreme_weights_reverse(self):
         # weight_static=0.0, weight_slm=1.0
-        # slm=1.0 -> risk=1.0 >= 0.52
+        # slm=1.0 -> risk=1.0 >= 0.2
         result = linear_weighted_gate(0.0, 1.0, {
             "weight_static": 0.0,
             "weight_slm": 1.0,
-            "escalation_threshold": 0.52,
+            "escalation_threshold": 0.2,
             "override_enabled": False,
         })
         assert result is True
@@ -148,16 +148,16 @@ class TestSemgrepOnly:
         assert semgrep_only(0.0, 0.9, {}) is False
 
 
-class TestCodesheriffOnly:
+class TestSmallModelOnly:
     def test_escalates_above_threshold(self):
-        assert codesheriff_only(0.0, 0.7, {"threshold": 0.5}) is True
+        assert small_model_only(0.0, 0.7, {"threshold": 0.5}) is True
 
     def test_no_escalate_below_threshold(self):
-        assert codesheriff_only(1.0, 0.3, {"threshold": 0.5}) is False
+        assert small_model_only(1.0, 0.3, {"threshold": 0.5}) is False
 
     def test_default_threshold_is_half(self):
-        assert codesheriff_only(0.0, 0.5, {}) is True
-        assert codesheriff_only(0.0, 0.49, {}) is False
+        assert small_model_only(0.0, 0.5, {}) is True
+        assert small_model_only(0.0, 0.49, {}) is False
 
 
 class TestAlwaysLLM:
@@ -167,18 +167,18 @@ class TestAlwaysLLM:
         assert always_llm(0.5, 0.5, {}) is True
 
 
-class TestSemgrepOrCodesheriff:
+class TestSemgrepOrSmallModel:
     def test_semgrep_triggers(self):
-        assert semgrep_or_codesheriff(0.7, 0.0, {"min_severity_weight": 0.5}) is True
+        assert semgrep_or_small_model(0.7, 0.0, {"min_severity_weight": 0.5}) is True
 
-    def test_codesheriff_triggers(self):
-        assert semgrep_or_codesheriff(0.0, 0.7, {"threshold": 0.5}) is True
+    def test_small_model_triggers(self):
+        assert semgrep_or_small_model(0.0, 0.7, {"threshold": 0.5}) is True
 
     def test_neither_triggers(self):
-        assert semgrep_or_codesheriff(0.0, 0.0, {"min_severity_weight": 0.5, "threshold": 0.5}) is False
+        assert semgrep_or_small_model(0.0, 0.0, {"min_severity_weight": 0.5, "threshold": 0.5}) is False
 
     def test_both_triggers(self):
-        assert semgrep_or_codesheriff(0.7, 0.7, {}) is True
+        assert semgrep_or_small_model(0.7, 0.7, {}) is True
 
 
 class TestLogisticRegressionGate:

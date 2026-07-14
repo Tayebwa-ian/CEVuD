@@ -106,9 +106,9 @@ def _evaluate_all_strategies(
 
     variants: Dict[str, Dict[str, Any]] = {
         "semgrep_only": {"fn": GATE_STRATEGIES["semgrep_only"].fn, "params": {}},
-        "codesheriff_only": {"fn": GATE_STRATEGIES["codesheriff_only"].fn, "params": {}},
+        "small_model": {"fn": GATE_STRATEGIES["small_model_only"].fn, "params": {}},
         "always_llm": {"fn": GATE_STRATEGIES["always_llm"].fn, "params": {}},
-        "semgrep_or_codesheriff": {"fn": GATE_STRATEGIES["semgrep_or_codesheriff"].fn, "params": {}},
+        "semgrep_or_small_model": {"fn": GATE_STRATEGIES["semgrep_or_small_model"].fn, "params": {}},
         "cevud_production_defaults": {
             "fn": GATE_STRATEGIES["cevud_full"].fn,
             "params": production_gate_params,
@@ -202,7 +202,7 @@ def _render_markdown_report(
         "scan cost → 0 (the paper's 'zero marginal-cost edge' idealisation) the two converge. "
         "See docs/METRICS.md for the full derivation and justifications. "
         "`always_llm` is the recall/cost upper bound (TRR=0, Cost reduction=0); `semgrep_only` "
-        "and `codesheriff_only` are equivalent to the 'skip one stage' ablations requested in "
+        "and `small model` are equivalent to the 'skip one stage' ablations requested in "
         "review (see gate_strategies.py docstring for why those pairs collapse to the same rule).\n"
     )
 
@@ -265,12 +265,6 @@ def _render_markdown_report(
     lines.append("|---|---|---|---|")
     for k, v in override_ablation_delta.items():
         lines.append(f"| {k} | {v['without']:.4f} | {v['with']:.4f} | {v['delta']:+.4f} |")
-    lines.append(
-        "\nA positive recall delta with a small precision cost supports keeping the override as a "
-        "deliberate, safety-oriented recall/precision tradeoff rather than an arbitrary patch; a "
-        "negligible delta would suggest the override is redundant given the tuned linear gate and "
-        "could be simplified away in a future revision.\n"
-    )
 
     report = "\n".join(lines)
     report_path = os.path.join(eval_dir, "comparative_report.md")
@@ -378,7 +372,7 @@ def main():
         "escalation_threshold": config["gate_parameters"]["escalation_threshold"],
         "override_enabled": True,
         "static_override_value": 1.0,
-        "slm_override_threshold": config["gate_parameters"]["slm_override_threshold"],
+        "slm_override_threshold": config["gate_parameters"].get("slm_override_threshold", 0.90),
     }
     strategy_results = _evaluate_all_strategies(
         splits["test"],
