@@ -36,11 +36,36 @@ RUN pip install --no-cache-dir transformers huggingface_hub
 # structure: /app/model_cache/models--<org>--<repo>/snapshots/<rev>/...
 # Baking that structure (via HF_HUB_CACHE) lets the pipeline run fully
 # offline (HF_HUB_OFFLINE=1) with zero per-run HuggingFace downloads.
+#
+# Build args let you point at a different classifier (e.g. your own HF Hub
+# repo) without editing the Dockerfile. The CI extracts the value from
+# config.json → models.classifier_model, so that file is the single source of
+# truth for the model ID across the entire project.
+#
+#   docker build --build-arg CLASSIFIER_MODEL=$(python -c "import json; print(json.load(open('config.json'))['models']['classifier_model']") ...
+#
+ARG CLASSIFIER_MODEL=""
+ARG EMBEDDING_MODEL="microsoft/codebert-base"
+ARG HF_TOKEN=""
+
 ENV HF_HUB_CACHE=/app/model_cache
+ENV HF_TOKEN=$HF_TOKEN
 RUN python - <<'PY'
+import os, sys
 from huggingface_hub import snapshot_download
-snapshot_download('jayansh21/codesheriff-bug-classifier', revision='main')  # default small model
-snapshot_download('microsoft/codebert-base')
+token = os.environ.get("HF_TOKEN") or None
+classifier = os.environ.get("CLASSIFIER_MODEL", "").strip()
+embedding  = os.environ.get("EMBEDDING_MODEL",  "microsoft/codebert-base")
+if not classifier:
+    print("[!] ERROR: CLASSIFIER_MODEL build-arg is required.")
+    print("    Pass it from config.json:")
+    print("    docker build --build-arg CLASSIFIER_MODEL=$(python -c \"import json; print(json.load(open('config.json'))['models']['classifier_model'])\") ...")
+    sys.exit(1)
+print(f"[*] Pre-caching classifier: {classifier}")
+snapshot_download(classifier, revision="main", token=token)
+print(f"[*] Pre-caching embedding model: {embedding}")
+snapshot_download(embedding, token=token)
+print("[+] All models cached.")
 PY
 # ==========================================
 # STAGE 3: Final Ephemeral Runtime Environment

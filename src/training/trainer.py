@@ -462,8 +462,8 @@ def train(cfg: TrainingConfig) -> Dict[str, Any]:
         load_best_model_at_end=True,
         # Select / restore the best checkpoint by validation loss, and stop
         # training once val loss stops improving (see EarlyStoppingCallback).
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
+        metric_for_best_model="f2",
+        greater_is_better=True,
         seed=cfg.seed,
         gradient_accumulation_steps=cfg.gradient_accumulation_steps,
         report_to="none",

@@ -98,7 +98,7 @@ workspace_storage/evaluation_runs/
 
 **Grid size:** Default 21 × 21 = 441 combinations.
 
-**Selection metric:** Fβ with β = 2.0 (`f2`), configurable via `config.json → evaluation.fbeta`. F2 weights recall twice as heavily as precision, reflecting the security-asymmetry: a missed vulnerability (FN) ships; an extra LLM call (FP) costs cents.
+**Selection metric:** Fβ with β = 2.0 (`f2`), configurable via `config.json → evaluation.fbeta`. F2 weights recall twice as heavily as precision. See `docs/METRICS.md` §2.5 for the full security-asymmetry justification: a missed vulnerability (FN) ships; an extra LLM call (FP) costs cents.
 
 **Tie-breaking:** Among cells with equal F2, prefer higher recall, then lower escalation rate (cheaper gate among equally good ones).
 
@@ -235,13 +235,14 @@ This is not a limitation — it is worth stating explicitly in the paper because
 
 ## 7. Metric Definitions
 
-All formulas and justifications are in `docs/METRICS.md`. The key metrics:
+All metric formulas and justifications are in `docs/METRICS.md`. The three
+pipeline-specific metrics are:
 
-| Metric | Formula | Why it matters |
-|--------|---------|----------------|
-| F2 | `(1+β²)·P·R / (β²·P + R)` with β=2 | Primary selection metric; weights recall over precision |
-| TRR | `1 - escalation_rate` | Volume efficiency: share of snippets kept from the LLM |
-| Cost reduction | `TRR × (1 - r)` where `r = c_gate / c_llm` | Monetary saving vs Always-LLM; accounts for local scan cost |
+| Metric | Role |
+|--------|------|
+| F2 | Primary gate-selection metric (β=2); see `docs/METRICS.md` §2.5 for the full security-asymmetry justification |
+| TRR | Volume efficiency: share of snippets kept from the LLM |
+| Cost reduction | Monetary saving vs Always-LLM; accounts for local scan cost |
 
 ---
 

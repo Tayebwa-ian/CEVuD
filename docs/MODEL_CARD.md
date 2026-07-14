@@ -1,8 +1,20 @@
+---
+license: mit
+language:
+  - en
+tags:
+  - code
+  - vulnerability
+  - security
+  - python
+pipeline_tag: text-classification
+---
+
 # Model Card — CEVuD Vulnerability Classifier
 
 > HuggingFace-ready model card. This documents the custom Stage-2 classifier
 > trained by `src/training/` and is the artifact to publish at
-> `huggingface.co/cevud/codebert-vuln-classifier`.
+> `huggingface.co/Denash/codebert-vuln-classifier`.
 
 ---
 
@@ -10,7 +22,7 @@
 
 ### Model Description
 
-- **Model ID**: `cevud/codebert-vuln-classifier`
+- **Model ID**: `Denash/codebert-vuln-classifier`
 - **Model type**: Fine-tuned transformer for binary sequence classification
 - **Base model**: [`microsoft/codebert-base`](https://huggingface.co/microsoft/codebert-base) (RoBERTa-based, ~125 M parameters)
 - **Language**: Python (code)
@@ -82,7 +94,7 @@ pipeline. Its intended use case is:
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 
-model_id = "cevud/codebert-vuln-classifier"
+model_id = "Denash/codebert-vuln-classifier"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForSequenceClassification.from_pretrained(model_id)
@@ -443,7 +455,7 @@ pip install transformers torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 
-model_id = "cevud/codebert-vuln-classifier"
+model_id = "Denash/codebert-vuln-classifier"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForSequenceClassification.from_pretrained(model_id)
 model.eval()
@@ -507,10 +519,20 @@ CEVuD Authors
   title={CEVuD: Cost-Effective Vulnerability Detection via Gated Static-Neural Reasoning},
   author={CEVuD Authors},
   year={2026},
-  note={Model: cevud/codebert-vuln-classifier; Dataset: cevud/cevud-training-dataset}
+  note={Model: Denash/codebert-vuln-classifier; Training Dataset: Denash/cevud-training-dataset; Pipeline Dataset: Denash/cevud-pipeline-dataset}
 }
 ```
 
 ## Model Card Contact
 
 Open an issue on the CEVuD GitHub repository.
+
+## Related Resources
+
+| Resource | Link |
+|----------|------|
+| **Training Dataset (CVEfixes)** | [`Denash/cevud-training-dataset`](https://huggingface.co/datasets/Denash/cevud-training-dataset) |
+| **Pipeline Dataset (VUDENC)** | [`Denash/cevud-pipeline-dataset`](https://huggingface.co/datasets/Denash/cevud-pipeline-dataset) |
+| **Source Dataset (CVEfixes)** | [`hitoshura25/cvefixes`](https://huggingface.co/datasets/hitoshura25/cvefixes) |
+| **Source Dataset (VUDENC)** | [`DetectVul/Vudenc`](https://huggingface.co/datasets/DetectVul/Vudenc) |
+| **CEVuD GitHub** | https://github.com/Denash/CEVuD |

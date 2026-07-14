@@ -26,6 +26,12 @@ from typing import Tuple, List
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModel
 from run_context import get_model_cache_dir
 
+try:
+    from huggingface_hub import HfApi, create_repo
+    _HF_AVAILABLE = True
+except ImportError:
+    _HF_AVAILABLE = False
+
 class ModelManager:
     """
     Singleton class for managing Hugging Face models used in CEVuD.
@@ -54,7 +60,7 @@ class ModelManager:
                     "model_cache_dir": "model_cache"
                 },
                 "models": {
-                    "classifier_model": "jayansh21/codesheriff-bug-classifier",
+                    "classifier_model": "Denash/codebert-vuln-classifier",
                     "embedding_model": "microsoft/codebert-base"
                 },
                 "gate_parameters": {
@@ -82,7 +88,7 @@ class ModelManager:
         os.makedirs(self.cache_dir, exist_ok=True)
         models_cfg = config.get("models", {}) if "config" in locals() else {}
         self.classifier_model_name = models_cfg.get(
-            "classifier_model", "jayansh21/codesheriff-bug-classifier"
+            "classifier_model", "Denash/codebert-vuln-classifier"
         )
         self.embedding_model_name = models_cfg.get(
             "embedding_model", "microsoft/codebert-base"
@@ -276,7 +282,7 @@ class ModelManager:
         Two output formats are supported and auto-detected from the model's
         ``id2label`` mapping:
 
-        * **Single-label softmax** (e.g. ``jayansh21/codesheriff-bug-classifier``, the default small model):
+        * **Single-label softmax** (e.g. a 5-class CodeBERT-based classifier):
           5 mutually-exclusive classes, one of which is the security
           vulnerability class -> ``P(vuln) = softmax[vuln_idx]``.
         * **Multi-label sigmoid** (e.g.
@@ -377,3 +383,61 @@ class ModelManager:
         # Tier 4: last-resort fallback.
         print("[!] No security/vulnerability label detected. Falling back to index 3.")
         return 3
+
+    def publish_to_hf(self, repo_id: str, local_dir: str,
+                      commit_message: str = "Add CEVuD trained model",
+                      token: str = None) -> dict:
+        """Upload a locally trained model to the HuggingFace Hub.
+
+        This is a convenience wrapper around ``huggingface_hub.HfApi.upload_folder``
+        that validates the checkpoint contents before uploading and returns the
+        Hub URL on success.
+
+        Args:
+            repo_id: Target Hub repo, e.g. ``"Denash/codebert-vuln-classifier"``.
+            local_dir: Path to the trained model directory containing
+                ``config.json`` and ``pytorch_model.bin``.
+            commit_message: Git commit message for the upload.
+            token: HF Hub token. Falls back to the ``HF_TOKEN`` environment
+                variable, then to the cached ``huggingface-cli`` token.
+
+        Returns:
+            dict with keys ``url`` (str) and ``repo_id`` (str) on success.
+
+        Raises:
+            ImportError: If ``huggingface_hub`` is not installed.
+            FileNotFoundError: If ``local_dir`` is missing required files.
+            ValueError: If ``repo_id`` is empty.
+            RuntimeError: On upload failure.
+        """
+        if not _HF_AVAILABLE:
+            raise ImportError(
+                "huggingface_hub is required for publish_to_hf(). "
+                "Install it: pip install huggingface_hub"
+            )
+        if not repo_id or not repo_id.strip():
+            raise ValueError("repo_id must be a non-empty string.")
+        local_dir = os.path.abspath(local_dir)
+        if not os.path.isdir(local_dir):
+            raise FileNotFoundError(f"Model directory not found: {local_dir}")
+        required = ("config.json", "pytorch_model.bin")
+        missing = [f for f in required if not os.path.isfile(os.path.join(local_dir, f))]
+        if missing:
+            raise FileNotFoundError(
+                f"Model directory is missing required files: {missing}. "
+                f"Expected a standard transformers save_pretrained() output in {local_dir}"
+            )
+
+        api = HfApi(token=token or os.environ.get("HF_TOKEN"))
+        try:
+            url = api.upload_folder(
+                folder_path=local_dir,
+                repo_id=repo_id,
+                repo_type="model",
+                commit_message=commit_message,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to upload model to {repo_id}: {exc}") from exc
+
+        print(f"[+] Model published to: {url}")
+        return {"url": url, "repo_id": repo_id}

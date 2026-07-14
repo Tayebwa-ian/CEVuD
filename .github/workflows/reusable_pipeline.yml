@@ -9,7 +9,7 @@ on:
         type: string
         default: "workspace_storage,tests"
       config-path:
-        description: "Path to config.json within the CEVuD action codebase"
+        description: "Path to config.json within the CEVuD scanner codebase"
         required: false
         type: string
         default: "/app/config.json"
@@ -27,10 +27,13 @@ on:
         required: false
       UNIPASSAU_API_KEY:
         required: false
+      HF_TOKEN:
+        required: false
 
-# CEVUD_RUN_ID is the single source of truth for the artifact directory. It is
-# set once here and passed into every stage (Stage 1/2/3) so they all write
-# to / read from the same run-scoped folder. See src/run_context.py.
+# config.json → models.classifier_model is the single source of truth for
+# the model ID. After checking out the scanner repo we extract it from
+# cevud-scanner/config.json and use it for the HF pull step and Docker
+# runtime. No workflow input overrides it.
 env:
   CEVUD_RUN_ID: run_${{ github.run_id }}
 
@@ -40,7 +43,7 @@ jobs:
     permissions:
       contents: read
       packages: read
-    
+      
     steps:
       - name: Checkout Target Codebase
         uses: actions/checkout@v4
@@ -53,6 +56,13 @@ jobs:
           repository: ${{ inputs.scanner-repo }}
           path: cevud-scanner
           ref: main
+
+      - name: Extract classifier model ID from cevud-scanner/config.json
+        id: model-id
+        run: |
+          MODEL_ID=$(python -c "import json; print(json.load(open('cevud-scanner/config.json'))['models']['classifier_model'])")
+          echo "model_id=$MODEL_ID" >> "$GITHUB_OUTPUT"
+          echo "[*] Classifier model from config.json: $MODEL_ID"
 
       - name: Initialize Environment Workspace Directories
         run: |
@@ -75,6 +85,30 @@ jobs:
         run: |
           docker pull ${{ steps.image.outputs.image }}:latest
 
+      - name: Pull SLM from HuggingFace Hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            -e HF_TOKEN \
+            -e CLASSIFIER_MODEL="${{ steps.model-id.outputs.model_id }}" \
+            ${{ steps.image.outputs.image }}:latest \
+            python -c "
+import os, sys
+from huggingface_hub import snapshot_download
+token = os.environ.get('HF_TOKEN') or None
+model_id = os.environ.get('CLASSIFIER_MODEL', '').strip()
+if not model_id:
+    print('[*] No model ID set, skipping.')
+    sys.exit(0)
+try:
+    path = snapshot_download(model_id, token=token)
+    print(f'[+] Model cached at: {path}')
+except Exception as exc:
+    print(f'[!] Model download failed (will try again at runtime): {exc}')
+"
+
       - name: Execute Stage 1 (Static Analysis Engine Capture)
         run: |
           RUN_DIR="workspace_storage/artifacts/${CEVUD_RUN_ID}"
@@ -86,9 +120,13 @@ jobs:
             semgrep --config=p/python --config=/app/semgrep_rules/custom_appsec_rules.yaml --no-git-ignore --exclude src --exclude workspace_storage --exclude cevud-scanner --json --output="/workspace/${RUN_DIR}/semgrep_results.json" /workspace
 
       - name: Execute Stage 2 (Local SLM Mathematical Gating)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           docker run --rm \
             -e CEVUD_RUN_ID="${CEVUD_RUN_ID}" \
+            -e HF_TOKEN="${HF_TOKEN}" \
+            -e CLASSIFIER_MODEL="${{ steps.model-id.outputs.model_id }}" \
             -v ${{ github.workspace }}:/workspace \
             ${{ steps.image.outputs.image }}:latest \
             python /app/src/triage_orchestrator.py --workspace /workspace --config ${{ inputs.config-path }} --exclude-dirs "${{ inputs.exclude-dirs }},cevud-scanner"

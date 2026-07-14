@@ -1,10 +1,10 @@
 # CEVuD Datasets
 
-> HuggingFace-ready dataset cards for the two corpora used by CEVuD:
-> **CVEfixes-based training dataset** (develops the Stage-2 classifier) and
-> **VUDENC-based pipeline dataset** (tunes and evaluates the full gated
-> pipeline). Publish these at `huggingface.co/<org>/cevud-training-dataset` and
-> `huggingface.co/<org>/cevud-pipeline-dataset`.
+> **Note**: This file is the legacy combined dataset card. Two dedicated cards
+> now exist: [`DATASET_CARD_CVEFIXES.md`](DATASET_CARD_CVEFIXES.md) and
+> [`DATASET_CARD_VUDENC.md`](DATASET_CARD_VUDENC.md). Publish those at
+> `huggingface.co/datasets/Denash/cevud-training-dataset` and
+> `huggingface.co/datasets/Denash/cevud-pipeline-dataset` respectively.
 
 ---
 
@@ -20,7 +20,7 @@ Stage-2 "small model") to distinguish vulnerable Python functions from safe ones
 
 | Property | Value |
 |----------|-------|
-| **Proposed HF ID** | `cevud/cevud-training-dataset` |
+| **Proposed HF ID** | `Denash/cevud-training-dataset` |
 | **Source dataset** | `hitoshura25/cvefixes` (HuggingFace) |
 | **Language** | Python |
 | **Task** | Binary sequence classification (vulnerable vs. safe) |
@@ -229,7 +229,7 @@ curation wrapper is released under MIT.
   title={CEVuD: Cost-Effective Vulnerability Detection via Gated Static-Neural Reasoning},
   author={CEVuD Authors},
   year={2026},
-  note={Dataset: cevud/cevud-training-dataset}
+  note={Dataset: Denash/cevud-training-dataset}
 }
 ```
 
@@ -249,7 +249,7 @@ pipeline (Semgrep + small model + gating + LLM).
 
 | Property | Value |
 |----------|-------|
-| **Proposed HF ID** | `cevud/cevud-pipeline-dataset` |
+| **Proposed HF ID** | `Denash/cevud-pipeline-dataset` |
 | **Source dataset** | `DetectVul/Vudenc` (HuggingFace) |
 | **Original paper** | Wartschinski et al., "Vulnerability Detection with Deep Learning on a Natural Codebase", *Information & Software Technology*, 2022 |
 | **Language** | Python |
@@ -449,7 +449,7 @@ LauraWartschinski (original paper) and DetectVul (HuggingFace port).
   title={CEVuD: Cost-Effective Vulnerability Detection via Gated Static-Neural Reasoning},
   author={CEVuD Authors},
   year={2026},
-  note={Dataset: cevud/cevud-pipeline-dataset}
+  note={Dataset: Denash/cevud-pipeline-dataset}
 }
 
 @article{wartschinski2022vudenc,

@@ -222,9 +222,10 @@ The classifier is evaluated **in isolation** on its held-out CVEfixes test split
 These are saved to `metrics.json` alongside the confusion-matrix, ROC, PR, and
 calibration plots. Note ROC-AUC / PR-AUC use the **continuous** `P(vulnerable)`
 probability, whereas F1 / F2 / the confusion matrix use the **argmax** class
-decision — so a model can have high AUC but a modest F1 if its decision
-threshold is poorly placed; the gate study consumes the probability, not the
-argmax, which is why the pipeline's recall can exceed the standalone F1.
+decision — equivalent to a hard threshold of **0.5** on `P(vulnerable)`. So a
+model can have high AUC but a modest F1 if its decision threshold is poorly
+placed; the gate study consumes the probability, not the argmax, which is why
+the pipeline's recall can exceed the standalone F1.
 
 ---
 

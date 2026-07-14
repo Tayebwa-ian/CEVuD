@@ -49,6 +49,14 @@ is the `P_slm` score fed into the Stage-2 linear gate. The published checkpoint
 contains both `pooler` and `classifier` weights. With `--freeze-backbone`, only
 the `classifier.*` submodule is trained and the encoder + pooler stay frozen.
 
+**Classification threshold.** The binary prediction used to compute accuracy,
+precision, recall, F1, and F2 during evaluation uses a hard threshold of
+**0.5** on `P(vulnerable)` (implemented as `argmax` over the two-class
+softmax). This threshold is implicit in `compute_metrics` in `trainer.py`, not
+exposed as a configurable parameter. ROC-AUC and PR-AUC use the continuous
+probability and are threshold-independent. See `docs/METRICS.md` for the
+canonical explanation.
+
 This is documented in full (with load snippet, hyperparameters, and limitations)
 in **[`MODEL_CARD.md`](MODEL_CARD.md)** — that file is
 the HuggingFace-ready model card.
@@ -460,23 +468,59 @@ research paper. The repository already ships ready-to-publish cards:
 - **Dataset cards** — [`DATASET_CARD.md`](DATASET_CARD.md)
   (CVEfixes training set + VUDENC evaluation set, shared schema).
 
-### Publish the model
+### Prerequisites
 
 ```bash
-# From the trained run directory (training_output/latest/model or run_*/model):
-python -m huggingface_hub huggingface-cli upload cevud/codebert-vuln-classifier ./model
-# then add MODEL_CARD.md as the repo README (rename to README.md on upload)
+pip install huggingface_hub
+huggingface-cli login   # paste your write token from https://huggingface.co/settings/tokens
+git lfs install         # required for large model files
 ```
 
-The checkpoint contains the full `RobertaForSequenceClassification` weights
-(pooler + classifier), so it loads with
-`AutoModelForSequenceClassification.from_pretrained("cevud/codebert-vuln-classifier")`.
+### Option A — CLI publish command (one-liner)
+
+```bash
+python -m src.training.cli publish \
+  --repo-id Denash/codebert-vuln-classifier \
+  --commit-message "Add CEVuD CodeBERT vuln classifier (epoch 4)"
+```
+
+This calls `ModelManager.publish_to_hf()` which validates the checkpoint
+contents and uploads via `HfApi.upload_folder()`.
+
+### Option B — Manual upload
+
+```bash
+huggingface-cli upload Denash/codebert-vuln-classifier \
+  training_output/latest/model/ \
+  --repo-type model
+```
+
+Then add the model card as the repo README:
+
+```bash
+cp docs/MODEL_CARD.md training_output/latest/model/README.md
+huggingface-cli upload Denash/codebert-vuln-classifier \
+  training_output/latest/model/README.md \
+  --repo-type model \
+  --path-in-repo README.md
+```
 
 ### Publish the datasets
 
 ```bash
-python -m huggingface_hub huggingface-cli upload cevud/cvefixes-benchmark benchmark_manifest_cvefixes.json
-python -m huggingface_hub huggingface-cli upload cevud/vudenc-benchmark   benchmark_manifest_vudenc.json
+huggingface-cli repo create Denash/cevud-training-dataset --type dataset
+huggingface-cli repo create Denash/cevud-pipeline-dataset   --type dataset
+
+huggingface-cli upload Denash/cevud-training-dataset \
+  benchmark_manifest_cvefixes.json --repo-type dataset --path-in-repo data/train.parquet
+
+huggingface-cli upload Denash/cevud-pipeline-dataset \
+  benchmark_manifest_vudenc.json   --repo-type dataset --path-in-repo data/test.parquet
+
+huggingface-cli upload Denash/cevud-training-dataset \
+  docs/DATASET_CARD_CVEFIXES.md --repo-type dataset --path-in-repo README.md
+huggingface-cli upload Denash/cevud-pipeline-dataset \
+  docs/DATASET_CARD_VUDENC.md --repo-type dataset --path-in-repo README.md
 ```
 
 > Before publishing, confirm the upstream CVEfixes and VUDENC licenses permit
@@ -608,3 +652,22 @@ Increase `--max-samples-per-class` or `--max-projects` to add more signal.
 Ensure `config.json` `models.classifier_model` points to the directory
 containing `pytorch_model.bin` and `config.json`.  Restart the process
 after editing the config.
+
+**Majority-class collapse (precision=1.0, recall≈0.2)**
+The model learned to predict almost everything as `safe`. The class weights
+from `_compute_class_weights` (~[0.64, 2.30]) were too weak to overcome the
+imbalance on this small dataset. Increase `--max-samples-per-class` or
+`--max-projects` to add more signal, or use `--freeze-backbone` for better
+sample efficiency.
+
+**Test ROC-AUC unexpectedly low**
+The standalone `evaluator.py` may have loaded `latest/model` (the final epoch)
+instead of the best checkpoint. Evaluation now resolves `best_model_checkpoint`
+from `trainer_state.json` automatically; re-run `python -m src.training.cli evaluate`
+to verify.
+
+**Near-duplicate threshold mismatch**
+`config.py` and the trainer's pre-flight guard must agree on
+`near_dup_threshold`. If noisy safe counterparts are slipping through, confirm
+the value in `config.json → training.near_dup_threshold` matches the trainer's
+pre-flight check (default: 0.75).

@@ -115,7 +115,9 @@ def test_model_manager_cpu_device(mock_config):
     """Ensure models are explicitly moved to CPU for CI/CD compatibility."""
     manager = ModelManager()
     
-    with patch("transformers.AutoModelForSequenceClassification.from_pretrained") as mock_model:
+    with patch("transformers.AutoTokenizer.from_pretrained") as mock_tok, \
+         patch("transformers.AutoModelForSequenceClassification.from_pretrained") as mock_model:
+        mock_tok.return_value = MagicMock()
         mock_instance = MagicMock()
         mock_model.return_value = mock_instance
         _, classifier = manager.get_classifier()

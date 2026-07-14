@@ -14,8 +14,9 @@
     "model_cache_dir": "workspace_storage/model_cache"
   },
   "models": {
-    "classifier_model": "jayansh21/codesheriff-bug-classifier",
-    "embedding_model": "microsoft/codebert-base"
+    "classifier_model": "Denash/codebert-vuln-classifier",
+    "embedding_model": "microsoft/codebert-base",
+    "_comment": "classifier_model can be a local path (training_output/latest/model), a HuggingFace Hub repo ID (Denash/codebert-vuln-classifier), or any path AutoModelForSequenceClassification.from_pretrained() accepts."
   },
   "semgrep_severity_map": {
     "ERROR": 1.0,

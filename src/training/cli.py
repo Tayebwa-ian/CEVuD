@@ -97,6 +97,15 @@ def _build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--test-path", default=None, help="Path to test.jsonl")
     ev.add_argument("--output-dir", default=None, help="Where to save metrics and plots")
 
+    # ── publish ─────────────────────────────────────────────────────────────
+    pb = sub.add_parser("publish", help="Upload the trained model to HuggingFace Hub")
+    pb.add_argument("--model-dir", default=None,
+                    help="Path to model directory (default: training_output/latest/model)")
+    pb.add_argument("--repo-id", default=None,
+                    help="HF Hub repo ID, e.g. Denash/codebert-vuln-classifier")
+    pb.add_argument("--commit-message", default="Add CEVuD trained model",
+                    help="Git commit message for the upload")
+
     # ── run-all ─────────────────────────────────────────────────────────────
     ra = sub.add_parser("run-all", help="Build dataset, train, and evaluate in one shot")
     ra.add_argument("--manifest", default=None)
@@ -226,6 +235,25 @@ def cmd_evaluate(args, cfg: TrainingConfig) -> None:
     )
 
 
+def cmd_publish(args, cfg: TrainingConfig) -> None:
+    model_dir = args.model_dir or str(cfg.latest_dir / "model")
+    repo_id = args.repo_id
+    if not repo_id:
+        raise SystemExit(
+            "ERROR: --repo-id is required. "
+            "Example: python -m src.training.cli publish --repo-id Denash/codebert-vuln-classifier"
+        )
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    from model_manager import ModelManager
+    manager = ModelManager()
+    result = manager.publish_to_hf(
+        repo_id=repo_id,
+        local_dir=model_dir,
+        commit_message=args.commit_message,
+    )
+    print(f"[+] Published: {result['url']}")
+
+
 def cmd_run_all(args, cfg: TrainingConfig) -> None:
     cmd_build_dataset(args, cfg)
     cmd_train(args, cfg)
@@ -241,6 +269,7 @@ def main() -> None:
         "build-dataset": cmd_build_dataset,
         "train": cmd_train,
         "evaluate": cmd_evaluate,
+        "publish": cmd_publish,
         "run-all": cmd_run_all,
     }
     dispatch[args.command](args, cfg)

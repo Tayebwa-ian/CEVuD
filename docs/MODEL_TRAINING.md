@@ -162,11 +162,27 @@ After training, the model directory (`training_output/latest/model`) can be:
 
 1. **Tested locally** — set `models.classifier_model` in `config.json` to
    `training_output/latest/model`.
-2. **Baked into Docker** — `docker build --build-arg CUSTOM_MODEL_PATH=training_output/latest/model ...`.
-3. **Uploaded to HuggingFace** — push the checkpoint to
-   `huggingface.co/<org>/cevud-codebert-vuln-classifier`, then set
-   `models.classifier_model` to that repo ID. The Dockerfile's model-downloader
-   stage will pre-cache it.
+2. **Baked into Docker** — `docker build --build-arg CLASSIFIER_MODEL=$(python -c "import json; print(json.load(open('config.json'))['models']['classifier_model']") ...`. The CI (`publish_image.yml`) does this automatically: it reads `config.json` and passes the value as the Docker build arg, so the `model_downloader` stage pre-caches the exact model the pipeline is configured to use.
+3. **Uploaded to HuggingFace** — push the checkpoint to your Hub repo, then set
+   `models.classifier_model` in `config.json` to that repo ID. The Docker
+   build and CI workflows pick it up automatically on the next push.
 
-The `latest` symlink is maintained automatically by `trainer.py`, so the
-pipeline always picks up the newest run without manual config updates.
+### One-liner publish
+
+```bash
+python -m src.training.cli publish \
+  --repo-id <your-hf-org>/<your-model-name> \
+  --model-dir training_output/latest/model
+```
+
+### CI integration
+
+1. Add a `HF_TOKEN` secret to your GitHub repo (Settings → Secrets → Actions).
+2. Set `models.classifier_model` in `config.json` to your published Hub repo ID.
+3. Push to `main`. The `publish_image.yml` workflow reads `config.json`, passes
+   the model ID as the `CLASSIFIER_MODEL` Docker build arg, and pre-caches it.
+4. The `security_pipeline.yml` workflow also reads `config.json` and pulls the
+   model at runtime if it is not already in the image.
+
+The `latest` symlink is maintained automatically by `trainer.py`, but the model
+ID in `config.json` is the single source of truth for both CI and runtime.
